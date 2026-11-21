@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CryptoKit
 import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -16,6 +17,7 @@ struct WebTPDFApp: App {
                 .frame(minWidth: 980, minHeight: 680)
                 .onAppear {
                     appDelegate.model = model
+                    model.backfillHistoryPDFPageCounts()
                     model.requestNotificationPermission()
                     model.refreshDockerStatus()
                     model.refreshTTSModels()
@@ -153,6 +155,48 @@ final class AppModel: ObservableObject {
         let outputPath: String?
         let succeeded: Bool
         let errorMessage: String?
+        var pageCount: Int?
+        var expectedPages: Int?
+        let lastPrintedPage: Int?
+        let unverifiedGaps: Int?
+        let verifiedPages: Int?
+
+        var isKindle: Bool {
+            URL(string: url)?.host?.lowercased().hasPrefix("read.amazon.") == true
+        }
+
+        var hasWarning: Bool {
+            guard succeeded else { return true }
+            if let unverifiedGaps { return unverifiedGaps > 0 }
+            guard let pageCount, let expectedPages else { return false }
+            return pageCount < expectedPages
+        }
+    }
+
+    private struct KindlePageTotal: Decodable {
+        let expectedPages: Int
+    }
+
+    private struct KindleVerificationProgress {
+        let url: String
+        let direction: PageTurnDirection
+        let unchecked: Int
+    }
+
+    private struct URLFetchResult: Decodable, Sendable {
+        let outputPath: String?
+        let pageCount: Int
+        let expectedPages: Int?
+        let lastPrintedPage: Int?
+        let unverifiedGaps: Int?
+        let verifiedPages: Int?
+        let message: String?
+    }
+
+    private struct URLFetchInterrupted: LocalizedError, Sendable {
+        let result: URLFetchResult
+        let message: String
+        var errorDescription: String? { message }
     }
 
     struct RuntimeCheckItem: Identifiable {
@@ -235,8 +279,12 @@ final class AppModel: ObservableObject {
         }
         return decoded
     }()
+    @Published private(set) var checkingHistoryPageCount: UUID?
+    @Published private var kindleVerificationProgress: KindleVerificationProgress?
+    @Published private(set) var historyPageCountMessages: [UUID: String] = [:]
     @Published var historyPageIndex: Int = 0
     @Published var isUpdatingApp: Bool = false
+    @Published private(set) var lastUpdateCheckAt = UserDefaults.standard.object(forKey: "lastUpdateCheckAt") as? Date
     @Published private(set) var isRunningQueue = false
     @Published var isQueueAutoPaused = false
     @Published var squeezerTargetURL: URL?
@@ -324,10 +372,11 @@ final class AppModel: ObservableObject {
 
     private var process: Process?
     private var fetchProcess: Process?
+    private var fetchOutputRemainder = Data()
     private var player: AVPlayer?
     private var activeOutputDirectory: URL?
     private var activeDryRun = false
-    private var cancelRequested = false
+    @Published private var cancelRequested = false
     private var jobStartedAt: Date?
     private var timerTask: Task<Void, Never>?
     private var preflightTask: Task<Void, Never>?
@@ -430,7 +479,18 @@ final class AppModel: ObservableObject {
     }
 
     var isRunning: Bool {
-        process != nil || preflightTask != nil || fetchProcess != nil || isFetchingURL || isRunningQueue
+        isUpdatingApp || process != nil || preflightTask != nil || fetchProcess != nil || isFetchingURL || isRunningQueue
+    }
+
+    var activeOperationLabel: String? {
+        guard isRunning else { return nil }
+        if isUpdatingApp { return t("更新中", "Updating") }
+        if cancelRequested { return t("停止中", "Stopping") }
+        return t("実行中", "Running")
+    }
+
+    var canCancelJob: Bool {
+        isRunning && !isUpdatingApp && !cancelRequested
     }
 
     var canEnqueueURL: Bool {
@@ -687,7 +747,12 @@ final class AppModel: ObservableObject {
         direction: PageTurnDirection,
         outputURL: URL?,
         succeeded: Bool,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        pageCount: Int? = nil,
+        expectedPages: Int? = nil,
+        lastPrintedPage: Int? = nil,
+        unverifiedGaps: Int? = nil,
+        verifiedPages: Int? = nil
     ) {
         let entry = URLFetchHistoryItem(
             id: UUID(),
@@ -696,7 +761,12 @@ final class AppModel: ObservableObject {
             timestamp: Date(),
             outputPath: outputURL?.path,
             succeeded: succeeded,
-            errorMessage: errorMessage
+            errorMessage: errorMessage,
+            pageCount: pageCount,
+            expectedPages: expectedPages,
+            lastPrintedPage: lastPrintedPage,
+            unverifiedGaps: unverifiedGaps,
+            verifiedPages: verifiedPages
         )
         urlFetchHistory.removeAll { $0.url == url && $0.direction == direction }
         urlFetchHistory.insert(entry, at: 0)
@@ -705,6 +775,86 @@ final class AppModel: ObservableObject {
             urlFetchHistory = Array(urlFetchHistory.prefix(100))
         }
         saveURLFetchHistory()
+    }
+
+    private func recordURLFetchFailure(url: String, direction: PageTurnDirection, error: Error) {
+        let result = (error as? URLFetchInterrupted)?.result
+        recordURLFetchHistory(
+            url: url, direction: direction, outputURL: nil, succeeded: false,
+            errorMessage: error.localizedDescription, pageCount: result?.pageCount, expectedPages: result?.expectedPages
+        )
+    }
+
+    func backfillHistoryPDFPageCounts() {
+        let missing = urlFetchHistory.compactMap { entry -> (UUID, String)? in
+            guard entry.pageCount == nil, let path = entry.outputPath else { return nil }
+            return (entry.id, path)
+        }
+        guard !missing.isEmpty else { return }
+        Task {
+            let counts = await Task.detached(priority: .utility) {
+                var result: [UUID: Int] = [:]
+                for (id, path) in missing {
+                    if let count = PDFDocument(url: URL(fileURLWithPath: path))?.pageCount, count > 0 {
+                        result[id] = count
+                    }
+                }
+                return result
+            }.value
+            var changed = false
+            for index in urlFetchHistory.indices where urlFetchHistory[index].pageCount == nil {
+                if let count = counts[urlFetchHistory[index].id] {
+                    urlFetchHistory[index].pageCount = count
+                    changed = true
+                }
+            }
+            if changed { saveURLFetchHistory() }
+        }
+    }
+
+    func checkKindleTotal(for item: URLFetchHistoryItem) {
+        guard item.isKindle, checkingHistoryPageCount == nil, !isRunning else { return }
+        let failure = t(
+            "総ページ数を取得できませんでした。専用ChromeでKindleにログインし、本文にページ番号が表示されるか確認してください。",
+            "Could not read the total. Sign in to Kindle in the login browser and check that the reader shows page numbers."
+        )
+        guard let python = resolvePythonCommand(), let script = resolveURLFetcherScript() else {
+            historyPageCountMessages[item.id] = failure
+            return
+        }
+        checkingHistoryPageCount = item.id
+        historyPageCountMessages[item.id] = nil
+        let resultURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WebTPDF-total-\(UUID().uuidString).json")
+        let lookup = Process()
+        lookup.executableURL = URL(fileURLWithPath: python)
+        lookup.arguments = [script.path, "--url", item.url, "--inspect-kindle-total", "--result-json", resultURL.path]
+        lookup.environment = mergedSubprocessEnvironment()
+        lookup.standardOutput = FileHandle.nullDevice
+        lookup.standardError = FileHandle.nullDevice
+        lookup.terminationHandler = { [weak self] finished in
+            Task { @MainActor in
+                defer { try? FileManager.default.removeItem(at: resultURL) }
+                guard let self else { return }
+                self.checkingHistoryPageCount = nil
+                guard let index = self.urlFetchHistory.firstIndex(where: { $0.id == item.id }) else { return }
+                if finished.terminationStatus == 0,
+                   let data = try? Data(contentsOf: resultURL),
+                   let result = try? JSONDecoder().decode(KindlePageTotal.self, from: data),
+                   result.expectedPages > 0 {
+                    self.urlFetchHistory[index].expectedPages = result.expectedPages
+                    self.saveURLFetchHistory()
+                } else {
+                    self.historyPageCountMessages[item.id] = failure
+                }
+            }
+        }
+        do {
+            try lookup.run()
+        } catch {
+            checkingHistoryPageCount = nil
+            historyPageCountMessages[item.id] = failure
+        }
     }
 
     func historyItem(forPDF pdfURL: URL) -> URLFetchHistoryItem? {
@@ -717,7 +867,26 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func activeHistoryQueueStatus(_ entry: URLFetchHistoryItem) -> PDFQueueItem.Status? {
+        pdfQueue.first {
+            $0.url == entry.url && $0.direction == entry.direction
+                && ($0.status == .pending || $0.status == .running)
+        }?.status
+    }
+
+    func remainingKindleIntervals(for entry: URLFetchHistoryItem) -> Int? {
+        guard let progress = kindleVerificationProgress,
+              progress.url == entry.url, progress.direction == entry.direction else { return nil }
+        return progress.unchecked
+    }
+
     func redownloadFromHistory(_ item: URLFetchHistoryItem) {
+        guard !pdfQueue.contains(where: {
+            $0.url == item.url && $0.direction == item.direction
+                && ($0.status == .pending || $0.status == .running)
+        }) else {
+            return
+        }
         pdfQueue.append(PDFQueueItem(url: item.url, direction: item.direction))
         isQueueAutoPaused = false
         if !isRunning {
@@ -792,6 +961,7 @@ final class AppModel: ObservableObject {
         preflightTask = Task { [weak self] in
             guard let self else { return }
             var processedCount = 0
+            var failedCount = 0
 
             while !self.cancelRequested,
                   !self.isQueueAutoPaused,
@@ -800,32 +970,34 @@ final class AppModel: ObservableObject {
                 let item = self.pdfQueue[nextIndex]
                 self.pdfQueue[nextIndex].status = .running
                 self.pdfQueue[nextIndex].errorMessage = nil
+                self.pdfQueue[nextIndex].outputURL = nil
                 self.statusMessage = self.t("キュー実行中 (\(processedCount)): \(item.url)", "Queue (\(processedCount)): \(item.url)")
                 self.appendLog("\n[Queue #\(processedCount)] (\(item.direction.label)) \(item.url)\n")
 
+                let outcome: Result<(URL, URLFetchResult), Error>
                 do {
-                    let mergedURL = try await self.performURLFetch(urlString: item.url, direction: item.direction)
-                    if self.cancelRequested {
-                        self.pdfQueue[nextIndex].status = .pending
-                        break
-                    }
-                    self.pdfQueue[nextIndex].status = .completed
-                    self.pdfQueue[nextIndex].outputURL = mergedURL
+                    outcome = .success(try await self.performURLFetch(urlString: item.url, direction: item.direction))
+                } catch {
+                    outcome = .failure(error)
+                }
+                // Earlier rows can be removed while awaiting the subprocess.
+                guard let index = self.pdfQueue.firstIndex(where: { $0.id == item.id }) else { continue }
+                switch outcome {
+                case let .success((mergedURL, result)):
+                    self.pdfQueue[index].status = .completed
+                    self.pdfQueue[index].outputURL = mergedURL
                     self.ebookURL = mergedURL
                     self.fetchedPDFURL = mergedURL
                     self.fetchedFromSourceURL = item.url
                     self.outputDirectory = mergedURL.deletingLastPathComponent()
-                    self.recordURLFetchHistory(url: item.url, direction: item.direction, outputURL: mergedURL, succeeded: true)
+                    self.recordURLFetchHistory(url: item.url, direction: item.direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages)
                     self.appendLog("[Queue #\(processedCount)] Saved -> \(mergedURL.path)\n")
-                } catch {
-                    if self.cancelRequested {
-                        self.pdfQueue[nextIndex].status = .pending
-                        break
-                    }
-                    self.pdfQueue[nextIndex].status = .failed
-                    self.pdfQueue[nextIndex].errorMessage = error.localizedDescription
-                    self.recordURLFetchHistory(url: item.url, direction: item.direction, outputURL: nil, succeeded: false, errorMessage: error.localizedDescription)
-                    self.appendLog("[Queue #\(processedCount)] Failed: \(error.localizedDescription)\n")
+                case let .failure(error):
+                    if !self.cancelRequested { failedCount += 1 }
+                    self.pdfQueue[index].status = self.cancelRequested ? .pending : .failed
+                    self.pdfQueue[index].errorMessage = self.cancelRequested ? nil : error.localizedDescription
+                    self.recordURLFetchFailure(url: item.url, direction: item.direction, error: error)
+                    self.appendLog("[Queue #\(processedCount)] \(error.localizedDescription)\n")
                 }
             }
 
@@ -840,6 +1012,14 @@ final class AppModel: ObservableObject {
                 let remaining = self.pdfQueue.filter { $0.status == .pending }.count
                 self.statusMessage = self.t("自動実行を一時停止しました（残り\(remaining)件）", "Queue paused (\(remaining) pending)")
                 self.progressText = self.t("一時停止", "Paused")
+            } else if failedCount > 0 {
+                self.runState = .failed
+                self.statusMessage = self.t(
+                    "キュー終了（成功 \(processedCount - failedCount)件、失敗 \(failedCount)件）",
+                    "Queue finished (\(processedCount - failedCount) succeeded, \(failedCount) failed)"
+                )
+                self.progressText = "100%"
+                self.remainingText = "00:00"
             } else {
                 self.runState = .completed
                 self.statusMessage = self.t("キュー実行完了 (\(processedCount)件処理)", "Queue completed (\(processedCount) item(s))")
@@ -861,6 +1041,7 @@ final class AppModel: ObservableObject {
         }
         sourceURLText = ""
 
+        let direction = pageTurnDirection
         cancelRequested = false
         runState = .running
         isFetchingURL = true
@@ -871,7 +1052,7 @@ final class AppModel: ObservableObject {
         logText = "Fetching PDF from URL: \(urlString)\n"
         recordURLFetchHistory(
             url: urlString,
-            direction: pageTurnDirection,
+            direction: direction,
             outputURL: nil,
             succeeded: false,
             errorMessage: t("取得中...", "Fetching...")
@@ -884,15 +1065,10 @@ final class AppModel: ObservableObject {
             }
 
             do {
-                let mergedURL = try await self.performURLFetch(urlString: urlString)
+                let (mergedURL, result) = try await self.performURLFetch(urlString: urlString, direction: direction)
                 self.preflightTask = nil
                 self.isFetchingURL = false
                 self.stopProgressClock()
-                if self.cancelRequested {
-                    self.runState = .idle
-                    self.statusMessage = "Canceled"
-                    return
-                }
                 self.ebookURL = mergedURL
                 self.fetchedPDFURL = mergedURL
                 self.fetchedFromSourceURL = urlString
@@ -902,7 +1078,7 @@ final class AppModel: ObservableObject {
                 self.progressText = "100%"
                 self.remainingText = "00:00"
                 self.refreshLibraryPDFs()
-                self.recordURLFetchHistory(url: urlString, direction: pageTurnDirection, outputURL: mergedURL, succeeded: true)
+                self.recordURLFetchHistory(url: urlString, direction: direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages)
                 self.appendLog("\nMerged PDF saved to: \(mergedURL.path)\n")
                 self.sendCompletionNotification(
                     title: self.t("PDF作成完了", "PDF Created"),
@@ -912,17 +1088,10 @@ final class AppModel: ObservableObject {
             } catch {
                 self.preflightTask = nil
                 self.isFetchingURL = false
+                self.recordURLFetchFailure(url: urlString, direction: direction, error: error)
                 if self.cancelRequested {
-                    self.recordURLFetchHistory(
-                        url: urlString,
-                        direction: self.pageTurnDirection,
-                        outputURL: nil,
-                        succeeded: false,
-                        errorMessage: self.t("キャンセル", "Canceled")
-                    )
                     self.finishCanceledPreflight()
                 } else {
-                    self.recordURLFetchHistory(url: urlString, direction: self.pageTurnDirection, outputURL: nil, succeeded: false, errorMessage: error.localizedDescription)
                     self.fail(error.localizedDescription)
                 }
                 self.startQueueIfAutoRunEnabled()
@@ -1233,6 +1402,11 @@ final class AppModel: ObservableObject {
             return
         }
 
+        guard !isRunning,
+              let updater = Bundle.main.url(forResource: "update_mac_app", withExtension: "sh") else {
+            return
+        }
+        let installedApp = Bundle.main.bundleURL.path
         let currentDisplay = appVersionDisplay
         let currentSHA = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         cancelRequested = false
@@ -1245,50 +1419,41 @@ final class AppModel: ObservableObject {
         logText = "Current app version: \(currentDisplay)\nUpdating WebTPDF Mac from \(repoRoot.path)...\n"
         startProgressClock()
 
-        let script = """
-        set -e
-        cd "\(repoRoot.path)"
-        RUNNING_DISPLAY="\(currentDisplay)"
-        RUNNING_SHA="\(currentSHA)"
-        git pull --ff-only origin main
-        AFTER_CNT=$(git rev-list --count HEAD)
-        AFTER_SHA=$(git rev-parse --short HEAD)
-        echo "Version: ${RUNNING_DISPLAY} -> v0.1.${AFTER_CNT} (${AFTER_SHA})"
-        if [ -n "$RUNNING_SHA" ] && [ "$RUNNING_SHA" = "$AFTER_SHA" ]; then
-          echo "NO_UPDATE_NEEDED=1"
-          exit 0
-        fi
-        if [ -n "$RUNNING_SHA" ] && [ "$RUNNING_SHA" != "$AFTER_SHA" ]; then
-          echo "Changes:"
-          git log --oneline "${RUNNING_SHA}..${AFTER_SHA}" || true
-        fi
-        zsh "30_UI/mac_app/build_mac_app.sh"
-        """
-
         runPythonSubprocess(
             pythonCommand: "/bin/zsh",
-            arguments: ["-c", script],
+            arguments: [updater.path, currentSHA, installedApp],
             workingDirectory: repoRoot
         ) { [weak self] exitCode in
             guard let self else { return }
             self.stopProgressClock()
             self.isUpdatingApp = false
-            if exitCode == 0 {
-                if self.logText.contains("NO_UPDATE_NEEDED=1") {
-                    self.runState = .completed
-                    self.statusMessage = self.t("すでに最新版です (\(currentDisplay))", "Already up to date (\(currentDisplay))")
-                    return
-                }
+            if exitCode == 0 || exitCode == 10 || exitCode == 11 {
+                let checkedAt = Date()
+                self.lastUpdateCheckAt = checkedAt
+                UserDefaults.standard.set(checkedAt, forKey: "lastUpdateCheckAt")
+            }
+            switch exitCode {
+            case 0:
                 UserDefaults.standard.set(currentDisplay, forKey: "lastUpdatedFromVersion")
                 self.runState = .completed
                 self.statusMessage = self.t("アップデート完了・再起動中...", "Update complete. Relaunching...")
-                let appPath = repoRoot.appendingPathComponent("40_Ops/apps/WebTPDF Mac.app").path
                 let relaunch = Process()
                 relaunch.executableURL = URL(fileURLWithPath: "/bin/zsh")
-                relaunch.arguments = ["-c", "sleep 1 && open \"\(appPath)\""]
-                try? relaunch.run()
-                NSApp.terminate(nil)
-            } else {
+                relaunch.arguments = ["-c", #"sleep 1 && /usr/bin/open "$1""#, "webtpdf-relaunch", installedApp]
+                do {
+                    try relaunch.run()
+                    NSApp.terminate(nil)
+                } catch {
+                    self.fail(self.t("更新しました。アプリを開き直してください。", "Updated. Reopen the app to use the new build."))
+                }
+            case 10:
+                self.runState = .completed
+                self.statusMessage = self.t("すでに最新版です (\(currentDisplay))", "Already up to date (\(currentDisplay))")
+            case 11:
+                self.runState = .completed
+                self.statusMessage = self.t("現在の修正を含む更新版はまだありません。", "No update containing the current build is available yet.")
+                self.appendLog("\n\(self.statusMessage)\n")
+            default:
                 self.fail(self.t("アップデートに失敗しました (exit \(exitCode))。", "Update failed (exit \(exitCode))."))
             }
         }
@@ -1553,6 +1718,7 @@ final class AppModel: ObservableObject {
             try proc.run()
             self.process = proc
         } catch {
+            isUpdatingApp = false
             fail("プロセスの起動に失敗しました: \(error.localizedDescription)")
         }
     }
@@ -1699,11 +1865,12 @@ final class AppModel: ObservableObject {
     }
 
     func cancelJob() {
+        guard canCancelJob else { return }
         cancelRequested = true
+        isQueueAutoPaused = true
+        statusMessage = t("停止中…", "Stopping…")
+        // Completion handlers keep ownership of the task until it has actually stopped.
         preflightTask?.cancel()
-        preflightTask = nil
-        isFetchingURL = false
-        isRunningQueue = false
         if let fetchProcess, fetchProcess.isRunning {
             fetchProcess.terminate()
         }
@@ -1958,7 +2125,7 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    private func performURLFetch(urlString: String, direction: PageTurnDirection? = nil) async throws -> URL {
+    private func performURLFetch(urlString: String, direction: PageTurnDirection? = nil) async throws -> (URL, URLFetchResult) {
         guard let parsed = URL(string: urlString),
               let scheme = parsed.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
@@ -1983,19 +2150,38 @@ final class AppModel: ObservableObject {
         )
         let outputURL = fetchedPDFRoot.appendingPathComponent("\(makeJobID())_\(hostPart).pdf")
 
+        let resolvedDirection = direction ?? pageTurnDirection
+        let checkpointURL: URL?
+        if let host = parsed.host?.lowercased(), host.hasPrefix("read.amazon.") {
+            let source = "\(resolvedDirection.rawValue)\n\(urlString)"
+            let key = SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
+            checkpointURL = applicationSupportRoot
+                .appendingPathComponent("KindleCheckpoints", isDirectory: true)
+                .appendingPathComponent("\(key).sqlite3")
+        } else {
+            checkpointURL = nil
+        }
+
+        let resultURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WebTPDF-\(UUID().uuidString).json")
+
         return try await withCheckedThrowingContinuation { continuation in
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: pythonCommand)
-            let resolvedDirection = direction ?? pageTurnDirection
             let maxPages = Int(maxPagesSetting.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1000
-            proc.arguments = [
+            var arguments = [
                 scriptURL.path,
                 "--url", urlString,
                 "--output", outputURL.path,
                 "--direction", resolvedDirection.rawValue,
                 "--max-pages", String(max(1, maxPages)),
                 "--auto-name",
+                "--result-json", resultURL.path,
             ]
+            if let checkpointURL {
+                arguments += ["--kindle-checkpoint", checkpointURL.path]
+            }
+            proc.arguments = arguments
             proc.currentDirectoryURL = fetchedPDFRoot
 
             var environment = ProcessInfo.processInfo.environment
@@ -2004,61 +2190,51 @@ final class AppModel: ObservableObject {
             proc.environment = environment
 
             let pipe = Pipe()
-            final class OutputPathBox: @unchecked Sendable {
-                private let lock = NSLock()
-                private var value: String?
-                func set(_ newValue: String) {
-                    lock.lock()
-                    value = newValue
-                    lock.unlock()
-                }
-                func get() -> String? {
-                    lock.lock()
-                    defer { lock.unlock() }
-                    return value
-                }
-            }
-            let resolvedOutputPath = OutputPathBox()
             proc.standardOutput = pipe
             proc.standardError = pipe
-            pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            pipe.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
                 let data = handle.availableData
-                guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else {
-                    return
-                }
-                var qualitySummary: String?
-                for line in chunk.components(separatedBy: .newlines) {
-                    if line.hasPrefix("OUTPUT_PDF=") {
-                        let candidate = String(line.dropFirst("OUTPUT_PDF=".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !candidate.isEmpty {
-                            resolvedOutputPath.set(candidate)
-                        }
-                    } else if line.hasPrefix("QUALITY_CHECK=") {
-                        let summary = String(line.dropFirst("QUALITY_CHECK=".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !summary.isEmpty {
-                            qualitySummary = summary
-                        }
-                    }
-                }
-                let capturedQuality = qualitySummary
-                Task { @MainActor in
-                    self?.appendLog(chunk)
-                    if let capturedQuality {
-                        self?.statusMessage = "PDF検証: \(capturedQuality)"
-                    }
+                guard !data.isEmpty else { return }
+                DispatchQueue.main.async {
+                    guard let self, let proc, self.fetchProcess === proc else { return }
+                    self.appendURLFetchOutput(data, url: urlString, direction: resolvedDirection)
                 }
             }
 
             proc.terminationHandler = { [weak self] terminated in
                 pipe.fileHandleForReading.readabilityHandler = nil
-                Task { @MainActor in
+                DispatchQueue.main.async {
+                    if let self, !self.fetchOutputRemainder.isEmpty {
+                        self.appendLog(String(decoding: self.fetchOutputRemainder, as: UTF8.self))
+                    }
+                    self?.fetchOutputRemainder = Data()
+                    self?.kindleVerificationProgress = nil
                     self?.fetchProcess = nil
-                    let finalURL = resolvedOutputPath.get().map { URL(fileURLWithPath: $0) } ?? outputURL
+                    let result = (try? Data(contentsOf: resultURL)).flatMap {
+                        try? JSONDecoder().decode(URLFetchResult.self, from: $0)
+                    }
+                    try? FileManager.default.removeItem(at: resultURL)
                     if terminated.terminationStatus == 0,
-                       FileManager.default.fileExists(atPath: finalURL.path) {
-                        continuation.resume(returning: finalURL)
+                       let result, let path = result.outputPath,
+                       FileManager.default.fileExists(atPath: path) {
+                        continuation.resume(returning: (URL(fileURLWithPath: path), result))
+                    } else if let result, let reason = result.message {
+                        let canResume = checkpointURL.map {
+                            FileManager.default.fileExists(atPath: $0.path)
+                        } ?? false
+                        let retry = canResume
+                            ? (self?.t(" 履歴の「再ダウンロード」で再開できます。", " Use Re-download in history to resume.") ?? "")
+                            : ""
+                        continuation.resume(throwing: URLFetchInterrupted(result: result, message: reason + retry))
                     } else if self?.cancelRequested == true {
-                        continuation.resume(throwing: UserVisibleError(message: "Canceled"))
+                        let message = self?.t("キャンセル", "Canceled") ?? "Canceled"
+                        continuation.resume(throwing: UserVisibleError(message: message))
+                    } else if let checkpointURL, FileManager.default.fileExists(atPath: checkpointURL.path) {
+                        let message = self?.t(
+                            "取得が中断されました。履歴の「再ダウンロード」で続きから再開します。",
+                            "Capture interrupted. Use Re-download in history to resume."
+                        ) ?? "Capture interrupted. Use Re-download in history to resume."
+                        continuation.resume(throwing: UserVisibleError(message: message))
                     } else {
                         continuation.resume(throwing: UserVisibleError(message: "URLからのPDF取得に失敗しました (exit \(terminated.terminationStatus))。ログを確認してください。"))
                     }
@@ -2073,6 +2249,24 @@ final class AppModel: ObservableObject {
                 continuation.resume(throwing: UserVisibleError(message: "PDF取得プロセスの起動に失敗しました: \(error.localizedDescription)"))
             }
         }
+    }
+
+    private func appendURLFetchOutput(_ data: Data, url: String, direction: PageTurnDirection) {
+        fetchOutputRemainder.append(data)
+        guard let end = fetchOutputRemainder.lastIndex(of: 10) else { return }
+        let output = String(decoding: fetchOutputRemainder[...end], as: UTF8.self)
+        fetchOutputRemainder = Data(fetchOutputRemainder[fetchOutputRemainder.index(after: end)...])
+
+        let prefix = "KINDLE_UNVERIFIED_GAPS="
+        var log = ""
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false).dropLast() {
+            if line.hasPrefix(prefix), let count = Int(line.dropFirst(prefix.count)), count >= 0 {
+                kindleVerificationProgress = KindleVerificationProgress(url: url, direction: direction, unchecked: count)
+            } else {
+                log += line + "\n"
+            }
+        }
+        if !log.isEmpty { appendLog(log) }
     }
 
     private func waitForDockerReady(dockerCommand: String) async -> Bool {
@@ -2330,12 +2524,19 @@ final class AppModel: ObservableObject {
                 center.add(req, withCompletionHandler: nil)
             } else {
                 Task.detached {
-                    let safeTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
-                    let safeBody = body.replacingOccurrences(of: "\"", with: "\\\"")
+                    let script = """
+                    on run args
+                        display notification (item 2 of args) with title ("WebTPDF Mac — " & item 1 of args) sound name "Glass"
+                    end run
+                    """
                     let proc = Process()
                     proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                    proc.arguments = ["-e", "display notification \"\(safeBody)\" with title \"WebTPDF Mac — \(safeTitle)\" sound name \"Glass\""]
-                    try? proc.run()
+                    proc.arguments = ["-e", script, "--", title, body]
+                    do {
+                        try proc.run()
+                    } catch {
+                        return
+                    }
                     proc.waitUntilExit()
                 }
             }
@@ -2636,12 +2837,24 @@ struct ContentView: View {
                     .menuStyle(.borderlessButton)
                     .accessibilityLabel(model.t("言語", "Language"))
 
-                    if model.isRunning {
+                    if let operation = model.activeOperationLabel {
+                        HStack(spacing: 5) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityHidden(true)
+                            Text(operation)
+                                .font(.callout)
+                        }
+                        .fixedSize()
+                    }
+
+                    if model.canCancelJob {
                         Button(role: .destructive) {
                             model.cancelJob()
                         } label: {
                             Label(model.t("停止", "Stop"), systemImage: "stop.fill")
                         }
+                        .help(model.t("実行中の処理を停止", "Stop the current operation"))
                         .keyboardShortcut(".", modifiers: [.command])
                     }
                 }
@@ -2925,13 +3138,21 @@ struct ContentView: View {
                 } else {
                     ForEach(Array(pageEntries.enumerated()), id: \.element.id) { idx, entry in
                         HStack(spacing: 10) {
-                            let isFetchingEntry = !entry.succeeded && (entry.errorMessage == "取得中..." || entry.errorMessage == "Fetching...")
+                            let queueStatus = model.activeHistoryQueueStatus(entry)
+                            let isFetchingEntry = queueStatus == .running || (
+                                model.isFetchingURL && !entry.succeeded
+                                && (entry.errorMessage == "取得中..." || entry.errorMessage == "Fetching...")
+                            )
                             if isFetchingEntry {
                                 ProgressView()
                                     .controlSize(.small)
+                                    .accessibilityLabel(model.t("取得中", "Fetching"))
+                            } else if queueStatus == .pending {
+                                Image(systemName: "clock")
+                                    .accessibilityLabel(model.t("待機中", "Queued"))
                             } else {
-                                Image(systemName: entry.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                    .foregroundStyle(entry.succeeded ? Color.green : Color.orange)
+                                Image(systemName: entry.hasWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                                    .foregroundStyle(entry.hasWarning ? Color.orange : Color.green)
                             }
 
                             VStack(alignment: .leading, spacing: 2) {
@@ -2941,18 +3162,68 @@ struct ContentView: View {
                                     .truncationMode(.middle)
                                 HStack(spacing: 8) {
                                     Text(entry.direction.label)
+                                    if let count = entry.pageCount {
+                                        if let last = entry.lastPrintedPage, let total = entry.expectedPages {
+                                            Text(model.t("PDF \(count)枚・Kindle \(last)/\(total)", "PDF \(count) pages · Kindle \(last)/\(total)"))
+                                                .monospacedDigit()
+                                        } else {
+                                            let pages = entry.expectedPages.map { "\(count)/\($0)" }
+                                                ?? (entry.isKindle ? model.t("\(count)/不明", "\(count)/unknown") : "\(count)")
+                                            Text(model.t("\(pages) ページ", "\(pages) pages"))
+                                                .monospacedDigit()
+                                        }
+                                    }
                                     if let path = entry.outputPath {
                                         Text(URL(fileURLWithPath: path).lastPathComponent)
                                             .lineLimit(1)
                                             .truncationMode(.middle)
                                     } else if let err = entry.errorMessage {
                                         Text(err)
+                                            .help(err)
                                             .lineLimit(1)
                                             .truncationMode(.tail)
                                     }
                                 }
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                                if let verified = entry.verifiedPages {
+                                    Text(model.t(
+                                        "PDF最終確認済み \(verified)枚",
+                                        "Final PDF verified · \(verified) pages"
+                                    ))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                }
+                                if isFetchingEntry, let gaps = model.remainingKindleIntervals(for: entry) {
+                                    Text(gaps == 0
+                                         ? model.t("未確認 0 区間・PDF最終確認中…", "0 unchecked intervals · Final PDF verification…")
+                                         : model.t("未確認 \(gaps) 区間・確認中…", "\(gaps) unchecked intervals · Checking…"))
+                                        .font(.caption2)
+                                        .monospacedDigit()
+                                        .foregroundStyle(gaps > 0 ? Color.orange : Color.secondary)
+                                } else if let gaps = entry.unverifiedGaps, gaps > 0 {
+                                    Text(model.t(
+                                        "最終ページ到達・未確認 \(gaps) 区間",
+                                        "Last page reached · \(gaps) unchecked intervals"
+                                    ))
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                                }
+                                if entry.isKindle && entry.expectedPages == nil && entry.pageCount != nil {
+                                    if let notice = model.historyPageCountMessages[entry.id] {
+                                        Text(notice)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Button(model.checkingHistoryPageCount == entry.id
+                                           ? model.t("確認中…", "Checking…")
+                                           : model.t("総ページ数を確認", "Check total pages")) {
+                                        model.checkKindleTotal(for: entry)
+                                    }
+                                    .buttonStyle(.link)
+                                    .font(.caption2)
+                                    .disabled(model.checkingHistoryPageCount != nil || model.isRunning)
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -2967,10 +3238,21 @@ struct ContentView: View {
                                 }
                             }
 
-                            Button(model.t("再ダウンロード", "Re-download")) {
+                            let retryButton = Button(
+                                isFetchingEntry ? model.t("取得中…", "Fetching…")
+                                : queueStatus == .pending ? model.t("待機中", "Queued")
+                                : model.t("再ダウンロード", "Re-download")
+                            ) {
                                 model.redownloadFromHistory(entry)
                             }
-                            .buttonStyle(.bordered)
+                            .disabled(isFetchingEntry || queueStatus != nil)
+                            if entry.hasWarning && !isFetchingEntry && queueStatus == nil {
+                                retryButton
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.orange)
+                            } else {
+                                retryButton.buttonStyle(.bordered)
+                            }
 
                             Button {
                                 model.removeURLFetchHistoryItem(entry.id)
@@ -3360,24 +3642,39 @@ struct ContentView: View {
     }
 
     private var updateAppButton: some View {
-        Button {
-            model.updateAndRelaunchApp()
-        } label: {
-            HStack(spacing: 6) {
-                if model.isUpdatingApp {
-                    ProgressView()
-                        .controlSize(.small)
+        HStack(spacing: 12) {
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(model.t("現在のバージョン \(model.appVersionDisplay)", "Installed version \(model.appVersionDisplay)"))
+                    .monospacedDigit()
+                if let checkedAt = model.lastUpdateCheckAt {
+                    let date = checkedAt.formatted(.dateTime.year().month().day().hour().minute())
+                    Text(model.t("最終確認 \(date)", "Last checked \(date)"))
                 } else {
-                    Image(systemName: "arrow.down.circle")
+                    Text(model.t("最終確認 未確認", "Last checked: Never"))
                 }
-                Text(
-                    model.isUpdatingApp
-                        ? model.t("アップデート中...", "Updating...")
-                        : model.t("アプリをアップデート", "Update App")
-                )
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Button {
+                model.updateAndRelaunchApp()
+            } label: {
+                HStack(spacing: 6) {
+                    if model.isUpdatingApp {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.down.circle")
+                    }
+                    Text(
+                        model.isUpdatingApp
+                            ? model.t("アップデート中...", "Updating...")
+                            : model.t("アプリをアップデート", "Update App")
+                    )
+                }
+            }
+            .disabled(model.isRunning)
         }
-        .disabled(model.isRunning)
     }
 
     private var dashboardView: some View {

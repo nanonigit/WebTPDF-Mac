@@ -16,6 +16,7 @@ APP_VERSION="0.1.${GIT_COMMIT_COUNT}"
 
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$BUILD_DIR"
 
+cp "$SCRIPT_DIR/update_mac_app.sh" "$RESOURCES_DIR/update_mac_app.sh"
 cp "$PRODUCT_ROOT/20_Backend/scripts/url_pdf_fetcher.py" "$RESOURCES_DIR/url_pdf_fetcher.py"
 chmod +x "$RESOURCES_DIR/url_pdf_fetcher.py"
 cp "$PRODUCT_ROOT/20_Backend/scripts/local_audiobook.py" "$RESOURCES_DIR/local_audiobook.py"
