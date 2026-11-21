@@ -161,7 +161,7 @@ final class AppModel: ObservableObject {
         let unverifiedGaps: Int?
         let verifiedPages: Int?
 
-        var isKindle: Bool {
+        var isReaderSite: Bool {
             URL(string: url)?.host?.lowercased().hasPrefix("read.amazon.") == true
         }
 
@@ -173,11 +173,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private struct KindlePageTotal: Decodable {
+    private struct ReaderPageTotal: Decodable {
         let expectedPages: Int
     }
 
-    private struct KindleVerificationProgress {
+    private struct ReaderVerificationProgress {
         let url: String
         let direction: PageTurnDirection
         let unchecked: Int
@@ -280,7 +280,7 @@ final class AppModel: ObservableObject {
         return decoded
     }()
     @Published private(set) var checkingHistoryPageCount: UUID?
-    @Published private var kindleVerificationProgress: KindleVerificationProgress?
+    @Published private var readerVerificationProgress: ReaderVerificationProgress?
     @Published private(set) var historyPageCountMessages: [UUID: String] = [:]
     @Published var historyPageIndex: Int = 0
     @Published var isUpdatingApp: Bool = false
@@ -812,11 +812,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func checkKindleTotal(for item: URLFetchHistoryItem) {
-        guard item.isKindle, checkingHistoryPageCount == nil, !isRunning else { return }
+    func checkReaderTotal(for item: URLFetchHistoryItem) {
+        guard item.isReaderSite, checkingHistoryPageCount == nil, !isRunning else { return }
         let failure = t(
-            "総ページ数を取得できませんでした。専用ChromeでKindleにログインし、本文にページ番号が表示されるか確認してください。",
-            "Could not read the total. Sign in to Kindle in the login browser and check that the reader shows page numbers."
+            "総ページ数を取得できませんでした。専用Chromeで対象サイトにログインし、本文にページ番号が表示されるか確認してください。",
+            "Could not read the total. Sign in to the site in the login browser and check that the reader shows page numbers."
         )
         guard let python = resolvePythonCommand(), let script = resolveURLFetcherScript() else {
             historyPageCountMessages[item.id] = failure
@@ -828,7 +828,7 @@ final class AppModel: ObservableObject {
             .appendingPathComponent("WebTPDF-total-\(UUID().uuidString).json")
         let lookup = Process()
         lookup.executableURL = URL(fileURLWithPath: python)
-        lookup.arguments = [script.path, "--url", item.url, "--inspect-kindle-total", "--result-json", resultURL.path]
+        lookup.arguments = [script.path, "--url", item.url, "--inspect-reader-total", "--result-json", resultURL.path]
         lookup.environment = mergedSubprocessEnvironment()
         lookup.standardOutput = FileHandle.nullDevice
         lookup.standardError = FileHandle.nullDevice
@@ -840,7 +840,7 @@ final class AppModel: ObservableObject {
                 guard let index = self.urlFetchHistory.firstIndex(where: { $0.id == item.id }) else { return }
                 if finished.terminationStatus == 0,
                    let data = try? Data(contentsOf: resultURL),
-                   let result = try? JSONDecoder().decode(KindlePageTotal.self, from: data),
+                   let result = try? JSONDecoder().decode(ReaderPageTotal.self, from: data),
                    result.expectedPages > 0 {
                     self.urlFetchHistory[index].expectedPages = result.expectedPages
                     self.saveURLFetchHistory()
@@ -874,8 +874,8 @@ final class AppModel: ObservableObject {
         }?.status
     }
 
-    func remainingKindleIntervals(for entry: URLFetchHistoryItem) -> Int? {
-        guard let progress = kindleVerificationProgress,
+    func remainingReaderIntervals(for entry: URLFetchHistoryItem) -> Int? {
+        guard let progress = readerVerificationProgress,
               progress.url == entry.url, progress.direction == entry.direction else { return nil }
         return progress.unchecked
     }
@@ -2156,7 +2156,7 @@ final class AppModel: ObservableObject {
             let source = "\(resolvedDirection.rawValue)\n\(urlString)"
             let key = SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
             checkpointURL = applicationSupportRoot
-                .appendingPathComponent("KindleCheckpoints", isDirectory: true)
+                .appendingPathComponent("ReaderCheckpoints", isDirectory: true)
                 .appendingPathComponent("\(key).sqlite3")
         } else {
             checkpointURL = nil
@@ -2179,7 +2179,7 @@ final class AppModel: ObservableObject {
                 "--result-json", resultURL.path,
             ]
             if let checkpointURL {
-                arguments += ["--kindle-checkpoint", checkpointURL.path]
+                arguments += ["--reader-checkpoint", checkpointURL.path]
             }
             proc.arguments = arguments
             proc.currentDirectoryURL = fetchedPDFRoot
@@ -2208,7 +2208,7 @@ final class AppModel: ObservableObject {
                         self.appendLog(String(decoding: self.fetchOutputRemainder, as: UTF8.self))
                     }
                     self?.fetchOutputRemainder = Data()
-                    self?.kindleVerificationProgress = nil
+                    self?.readerVerificationProgress = nil
                     self?.fetchProcess = nil
                     let result = (try? Data(contentsOf: resultURL)).flatMap {
                         try? JSONDecoder().decode(URLFetchResult.self, from: $0)
@@ -2257,11 +2257,11 @@ final class AppModel: ObservableObject {
         let output = String(decoding: fetchOutputRemainder[...end], as: UTF8.self)
         fetchOutputRemainder = Data(fetchOutputRemainder[fetchOutputRemainder.index(after: end)...])
 
-        let prefix = "KINDLE_UNVERIFIED_GAPS="
+        let prefix = "READER_UNVERIFIED_GAPS="
         var log = ""
         for line in output.split(separator: "\n", omittingEmptySubsequences: false).dropLast() {
             if line.hasPrefix(prefix), let count = Int(line.dropFirst(prefix.count)), count >= 0 {
-                kindleVerificationProgress = KindleVerificationProgress(url: url, direction: direction, unchecked: count)
+                readerVerificationProgress = ReaderVerificationProgress(url: url, direction: direction, unchecked: count)
             } else {
                 log += line + "\n"
             }
@@ -3001,7 +3001,7 @@ struct ContentView: View {
                             }
                             .disabled(model.isRunning)
 
-                            Text(model.t("このアプリが自動操作するための専用Chromeを開きます。Kindle / O'Reilly などログインが必要なサイトは、ここから事前にログインしてください。", "Opens the dedicated Chrome browser controlled by this app. Sign in here beforehand for sites requiring authentication (e.g. Kindle / O'Reilly)."))
+                            Text(model.t("このアプリが自動操作するための専用Chromeを開きます。ログインが必要な電子書籍サイトは、ここから事前にログインしてください。", "Opens the dedicated Chrome browser controlled by this app. Sign in here beforehand for sites requiring authentication."))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -3164,11 +3164,11 @@ struct ContentView: View {
                                     Text(entry.direction.label)
                                     if let count = entry.pageCount {
                                         if let last = entry.lastPrintedPage, let total = entry.expectedPages {
-                                            Text(model.t("PDF \(count)枚・Kindle \(last)/\(total)", "PDF \(count) pages · Kindle \(last)/\(total)"))
+                                            Text(model.t("PDF \(count)枚・リーダー \(last)/\(total)", "PDF \(count) pages · リーダー \(last)/\(total)"))
                                                 .monospacedDigit()
                                         } else {
                                             let pages = entry.expectedPages.map { "\(count)/\($0)" }
-                                                ?? (entry.isKindle ? model.t("\(count)/不明", "\(count)/unknown") : "\(count)")
+                                                ?? (entry.isReaderSite ? model.t("\(count)/不明", "\(count)/unknown") : "\(count)")
                                             Text(model.t("\(pages) ページ", "\(pages) pages"))
                                                 .monospacedDigit()
                                         }
@@ -3194,7 +3194,7 @@ struct ContentView: View {
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                                 }
-                                if isFetchingEntry, let gaps = model.remainingKindleIntervals(for: entry) {
+                                if isFetchingEntry, let gaps = model.remainingReaderIntervals(for: entry) {
                                     Text(gaps == 0
                                          ? model.t("未確認 0 区間・PDF最終確認中…", "0 unchecked intervals · Final PDF verification…")
                                          : model.t("未確認 \(gaps) 区間・確認中…", "\(gaps) unchecked intervals · Checking…"))
@@ -3209,7 +3209,7 @@ struct ContentView: View {
                                     .font(.caption2)
                                     .foregroundStyle(.orange)
                                 }
-                                if entry.isKindle && entry.expectedPages == nil && entry.pageCount != nil {
+                                if entry.isReaderSite && entry.expectedPages == nil && entry.pageCount != nil {
                                     if let notice = model.historyPageCountMessages[entry.id] {
                                         Text(notice)
                                             .font(.caption2)
@@ -3218,7 +3218,7 @@ struct ContentView: View {
                                     Button(model.checkingHistoryPageCount == entry.id
                                            ? model.t("確認中…", "Checking…")
                                            : model.t("総ページ数を確認", "Check total pages")) {
-                                        model.checkKindleTotal(for: entry)
+                                        model.checkReaderTotal(for: entry)
                                     }
                                     .buttonStyle(.link)
                                     .font(.caption2)

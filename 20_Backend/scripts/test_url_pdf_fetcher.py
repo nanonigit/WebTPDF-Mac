@@ -192,10 +192,10 @@ class UrlPdfFetcherTests(unittest.TestCase):
         self.httpd.server_close()
         self.tmp.cleanup()
 
-    def test_kindle_redownload_merges_saved_pages_without_gaps(self) -> None:
+    def test_reader_redownload_merges_saved_pages_without_gaps(self) -> None:
         import fitz
 
-        reader = self.root / "kindle.html"
+        reader = self.root / "reader.html"
         html = """
             <img id="page" width="200" height="260"><p id="position"></p>
             <button id="back" hidden>Back to Library</button>
@@ -268,21 +268,21 @@ class UrlPdfFetcherTests(unittest.TestCase):
             </script>
         """
         reader.write_text(html.replace("FAIL_CONDITION", "next === 25"), encoding="utf-8")
-        url = f"http://127.0.0.1:{self.port}/kindle.html?asin=TEST"
+        url = f"http://127.0.0.1:{self.port}/reader.html?asin=TEST"
         output = self.root / "resumed.pdf"
-        checkpoint = fetcher.KindleCheckpoint(self.root / "checkpoint.sqlite3")
+        checkpoint = fetcher.ReaderCheckpoint(self.root / "checkpoint.sqlite3")
         with patch.object(fetcher, "resolve_cdp_url", return_value=None), patch.object(
-            fetcher, "is_kindle_cloud_reader", return_value=True
+            fetcher, "is_paginated_reader", return_value=True
         ):
             with self.assertRaisesRegex(RuntimeError, "取得済み: 24"):
-                fetcher.fetch_via_browser(url, output, 28, 10, kindle_checkpoint=checkpoint)
+                fetcher.fetch_via_browser(url, output, 28, 10, reader_checkpoint=checkpoint)
             self.assertEqual(len(checkpoint.load()), 24)
             self.assertFalse(output.exists())
 
             report = self.root / "result.json"
             args = [
                 "url_pdf_fetcher", "--url", url, "--output", str(output),
-                "--max-pages", "24", "--kindle-checkpoint", str(checkpoint.path),
+                "--max-pages", "24", "--reader-checkpoint", str(checkpoint.path),
                 "--result-json", str(report),
             ]
             with patch.object(sys, "argv", args):
@@ -300,8 +300,8 @@ class UrlPdfFetcherTests(unittest.TestCase):
             )
             args[args.index("--max-pages") + 1] = "28"
             with patch.object(sys, "argv", args), patch.object(
-                fetcher, "jump_to_kindle_chapter", wraps=fetcher.jump_to_kindle_chapter
-            ) as jump, patch.object(fetcher, "recover_kindle_oops", wraps=fetcher.recover_kindle_oops) as recover:
+                fetcher, "jump_to_reader_chapter", wraps=fetcher.jump_to_reader_chapter
+            ) as jump, patch.object(fetcher, "recover_reader_oops", wraps=fetcher.recover_reader_oops) as recover:
                 self.assertEqual(fetcher.main(), 0)
                 self.assertEqual(jump.call_args.args[1], 1)
                 same_tab = recover.call_args_list[0].args[0]
@@ -322,7 +322,7 @@ class UrlPdfFetcherTests(unittest.TestCase):
                 pixels = page.get_pixmap()
                 self.assertAlmostEqual(pixels.pixel(pixels.width // 2, pixels.height // 2)[0], number * 8, delta=3)
 
-    def test_kindle_gap_only_inserts_views_between_matched_anchors(self) -> None:
+    def test_reader_gap_only_inserts_views_between_matched_anchors(self) -> None:
         import hashlib
         from playwright.sync_api import sync_playwright
 
@@ -364,21 +364,21 @@ class UrlPdfFetcherTests(unittest.TestCase):
                     page.evaluate("(n) => render(n)", number)
                     page.get_by_text(f"Page {number} of 3", exact=True).wait_for()
                     ready()
-                    pdf, png = fetcher.capture_kindle_page_as_pdf_bytes(page)
-                    return fetcher.KindleCapture(pdf, number, hashlib.sha256(png).hexdigest(), 3, None, None)
+                    pdf, png = fetcher.capture_reader_page_as_pdf_bytes(page)
+                    return fetcher.ReaderCapture(pdf, number, hashlib.sha256(png).hexdigest(), 3, None, None)
 
                 left, right = saved(1), saved(3)
                 saved(1)
-                repaired = fetcher.verify_kindle_gap(page, left, right, "ArrowRight")
+                repaired = fetcher.verify_reader_gap(page, left, right, "ArrowRight")
                 self.assertIsNotNone(repaired)
                 self.assertEqual(len(PdfReader(io.BytesIO(repaired)).pages), 1)
                 page.evaluate("window.skipMiddle = true")
                 saved(1)
-                self.assertEqual(fetcher.verify_kindle_gap(page, left, right, "ArrowRight"), b"")
+                self.assertEqual(fetcher.verify_reader_gap(page, left, right, "ArrowRight"), b"")
             finally:
                 browser.close()
 
-    def test_kindle_end_finalizes_saved_pdf_and_checks_repaired_order(self) -> None:
+    def test_reader_end_finalizes_saved_pdf_and_checks_repaired_order(self) -> None:
         from PIL import Image
         import fitz
 
@@ -387,10 +387,10 @@ class UrlPdfFetcherTests(unittest.TestCase):
             Image.new("RGB", (100, 120), (value, 20, 40)).save(output, "PDF")
             return output.getvalue()
 
-        checkpoint = fetcher.KindleCheckpoint(self.root / "finished.sqlite3")
+        checkpoint = fetcher.ReaderCheckpoint(self.root / "finished.sqlite3")
         source = [tile(value) for value in (40, 120, 160)]
         for ordinal, (position, pdf) in enumerate(zip((1, 3, 4), source), 1):
-            checkpoint.append(ordinal, fetcher.KindleCapture(
+            checkpoint.append(ordinal, fetcher.ReaderCapture(
                 pdf, position, "fixture", 4, 100 if position == 4 else 0, 1114,
             ))
         url = "https://read.amazon.co.jp/?asin=TEST"
@@ -401,11 +401,11 @@ class UrlPdfFetcherTests(unittest.TestCase):
             patch.object(fetcher, "log") as log,
         ):
             count, path = fetcher.fetch_via_browser(
-                url, output, 100, 10, kindle_checkpoint=checkpoint, result_details=details,
+                url, output, 100, 10, reader_checkpoint=checkpoint, result_details=details,
             )
         self.assertEqual([message for (message,), _ in log.call_args_list
-                          if message.startswith("KINDLE_UNVERIFIED_GAPS=")],
-                         ["KINDLE_UNVERIFIED_GAPS=1"])
+                          if message.startswith("READER_UNVERIFIED_GAPS=")],
+                         ["READER_UNVERIFIED_GAPS=1"])
         self.assertEqual((count, path), (3, output))
         self.assertEqual(details, {
             "expectedPages": 4, "lastPrintedPage": 4, "unverifiedGaps": 1, "verifiedPages": 3,
@@ -419,16 +419,16 @@ class UrlPdfFetcherTests(unittest.TestCase):
         with (
             patch("playwright.sync_api.sync_playwright"),
             patch.object(fetcher, "resolve_cdp_url", return_value="http://localhost"),
-            patch.object(fetcher, "_wait_for_kindle_reader", return_value=True),
-            patch.object(fetcher, "verify_kindle_gap", return_value=inserted),
+            patch.object(fetcher, "_wait_for_reader_reader", return_value=True),
+            patch.object(fetcher, "verify_reader_gap", return_value=inserted),
             patch.object(fetcher, "log") as log,
         ):
             count, path = fetcher.fetch_via_browser(
-                url, second_output, 100, 10, kindle_checkpoint=checkpoint, result_details=details,
+                url, second_output, 100, 10, reader_checkpoint=checkpoint, result_details=details,
             )
         self.assertEqual([message for (message,), _ in log.call_args_list
-                          if message.startswith("KINDLE_UNVERIFIED_GAPS=")],
-                         ["KINDLE_UNVERIFIED_GAPS=1", "KINDLE_UNVERIFIED_GAPS=0"])
+                          if message.startswith("READER_UNVERIFIED_GAPS=")],
+                         ["READER_UNVERIFIED_GAPS=1", "READER_UNVERIFIED_GAPS=0"])
         self.assertEqual((count, path), (4, output))
         self.assertEqual(details["unverifiedGaps"], 0)
         self.assertEqual(details["verifiedPages"], 4)
@@ -439,9 +439,9 @@ class UrlPdfFetcherTests(unittest.TestCase):
                 pixels = page.get_pixmap()
                 self.assertAlmostEqual(pixels.pixel(pixels.width // 2, pixels.height // 2)[0], value, delta=3)
         with self.assertRaisesRegex(RuntimeError, "1 ページ目"):
-            fetcher.verify_merged_kindle_pdf([inserted, *source], output, 4)
+            fetcher.verify_merged_reader_pdf([inserted, *source], output, 4)
 
-    def test_kindle_go_to_location_uses_the_rendered_page_to_seek(self) -> None:
+    def test_reader_go_to_location_uses_the_rendered_page_to_seek(self) -> None:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as playwright:
@@ -499,8 +499,8 @@ class UrlPdfFetcherTests(unittest.TestCase):
                     </script>
                 """)
                 page.get_by_text("Page 2 of 50", exact=True).wait_for()
-                fetcher.seek_kindle_position(page, 24, target_is_printed_page=True)
-                kind, position = fetcher.get_kindle_position(page)
+                fetcher.seek_reader_position(page, 24, target_is_printed_page=True)
+                kind, position = fetcher.get_reader_position(page)
                 self.assertEqual(kind, "page")
                 self.assertLessEqual(abs(position - 24), 1)
                 entered = page.evaluate("window.visitedLocations")
@@ -510,8 +510,8 @@ class UrlPdfFetcherTests(unittest.TestCase):
                 # The live reader's cover shows Location even when the saved
                 # checkpoint is a printed page. The first probe reveals pages.
                 page.locator("p").evaluate("(footer) => footer.textContent = 'Location 4 of 499 ● 0%'")
-                self.assertTrue(fetcher.seek_kindle_position(page, 24, True, 50))
-                self.assertEqual(fetcher.get_kindle_position(page), ("page", 24))
+                self.assertTrue(fetcher.seek_reader_position(page, 24, True, 50))
+                self.assertEqual(fetcher.get_reader_position(page), ("page", 24))
                 entered = page.evaluate("window.visitedLocations")
                 self.assertGreater(entered[-1], 24)
 
@@ -519,13 +519,13 @@ class UrlPdfFetcherTests(unittest.TestCase):
                 # page number. The direct page field wins when both are offered.
                 page.evaluate("window.pageMenuAvailable = true")
                 position = 24
-                self.assertTrue(fetcher.seek_kindle_position(page, position, target_is_printed_page=True))
+                self.assertTrue(fetcher.seek_reader_position(page, position, target_is_printed_page=True))
                 self.assertEqual(page.evaluate("window.visitedPages"), [position])
                 self.assertEqual(page.evaluate("window.visitedLocations"), entered)
             finally:
                 browser.close()
 
-    def test_kindle_checkpoint_image_tolerates_encoding_but_rejects_other_content(self) -> None:
+    def test_reader_checkpoint_image_tolerates_encoding_but_rejects_other_content(self) -> None:
         from PIL import Image, ImageDraw
 
         image = Image.new("RGB", (400, 600), "white")
@@ -538,22 +538,22 @@ class UrlPdfFetcherTests(unittest.TestCase):
         padded.save(checkpoint, "PDF")
         frame = io.BytesIO()
         image.save(frame, "PNG")
-        self.assertTrue(fetcher.matches_saved_kindle_image(frame.getvalue(), checkpoint.getvalue()))
+        self.assertTrue(fetcher.matches_saved_reader_image(frame.getvalue(), checkpoint.getvalue()))
         slightly_darker = io.BytesIO()
         Image.eval(image, lambda value: max(0, value - 1)).save(slightly_darker, "PNG")
-        self.assertFalse(fetcher.matches_saved_kindle_image(slightly_darker.getvalue(), checkpoint.getvalue()))
-        self.assertTrue(fetcher.matches_saved_kindle_image(
+        self.assertFalse(fetcher.matches_saved_reader_image(slightly_darker.getvalue(), checkpoint.getvalue()))
+        self.assertTrue(fetcher.matches_saved_reader_image(
             slightly_darker.getvalue(), checkpoint.getvalue(), same_printed_page=True,
         ))
         draw.rectangle((50, 455, 290, 470), fill="black")
         different = io.BytesIO()
         image.save(different, "PNG")
-        self.assertFalse(fetcher.matches_saved_kindle_image(different.getvalue(), checkpoint.getvalue()))
-        self.assertFalse(fetcher.matches_saved_kindle_image(
+        self.assertFalse(fetcher.matches_saved_reader_image(different.getvalue(), checkpoint.getvalue()))
+        self.assertFalse(fetcher.matches_saved_reader_image(
             different.getvalue(), checkpoint.getvalue(), same_printed_page=True,
         ))
 
-    def test_kindle_library_reopens_unique_exact_title(self) -> None:
+    def test_reader_library_reopens_unique_exact_title(self) -> None:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as playwright:
@@ -585,18 +585,18 @@ class UrlPdfFetcherTests(unittest.TestCase):
                 ))
                 url = "https://read.amazon.co.jp/?asin=TEST"
                 page.goto(url)
-                self.assertTrue(fetcher.reopen_kindle_from_library(page, url, "Example Book"))
+                self.assertTrue(fetcher.reopen_reader_from_library(page, url, "Example Book"))
             finally:
                 browser.close()
 
-    def test_canceled_kindle_capture_reports_saved_progress(self) -> None:
+    def test_canceled_reader_capture_reports_saved_progress(self) -> None:
         output = self.root / "canceled.pdf"
-        checkpoint = fetcher.KindleCheckpoint(self.root / "checkpoint.sqlite3")
-        checkpoint.append(1, fetcher.KindleCapture(make_sample_pdf_bytes(1), 1, None, 4, None, None))
+        checkpoint = fetcher.ReaderCheckpoint(self.root / "checkpoint.sqlite3")
+        checkpoint.append(1, fetcher.ReaderCapture(make_sample_pdf_bytes(1), 1, None, 4, None, None))
         report = self.root / "result.json"
         args = [
             "url_pdf_fetcher", "--url", "https://read.amazon.co.jp/?asin=TEST",
-            "--output", str(output), "--kindle-checkpoint", str(checkpoint.path),
+            "--output", str(output), "--reader-checkpoint", str(checkpoint.path),
             "--result-json", str(report),
         ]
         with patch.object(sys, "argv", args), patch.object(
