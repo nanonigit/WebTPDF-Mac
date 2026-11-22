@@ -21,7 +21,6 @@ struct WebTPDFApp: App {
                     model.requestNotificationPermission()
                     model.refreshDockerStatus()
                     model.refreshTTSModels()
-                    model.refreshOllamaModels()
                     model.refreshRuntimeChecks()
                     model.refreshLibraryPDFs()
                 }
@@ -1368,7 +1367,6 @@ final class AppModel: ObservableObject {
                 self.remainingText = "00:00"
                 self.cachedPythonPath = nil
                 self.refreshTTSModels()
-                self.refreshOllamaModels()
                 self.refreshRuntimeChecks()
             } else {
                 self.fail("\(title) \(self.t("に失敗しました", "failed")) (exit \(exitCode)).")
@@ -3478,20 +3476,14 @@ struct ContentView: View {
         VisibleScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(model.t("AI接続の管理", "Manage AI Connections"))
+                    Text(model.t("クラウド音声 API 設定", "Cloud TTS API Settings"))
                         .font(.title2.bold())
-                    Text(model.t("音声変換 (Audio Lab) で使えるクラウドTTS API（OpenAI / ElevenLabs）と、テキスト整形・要約用のローカルLLM（Ollama）を管理します。", "Configure cloud TTS APIs (OpenAI / ElevenLabs) for Audio Lab and local LLMs (Ollama) for text preparation."))
+                    Text(model.t("オーディオブック変換で使えるクラウド高音質音声（OpenAI / ElevenLabs）の API キーを管理します。（※ macOS 標準音声や Neural 音声は API キー不要・無料でそのまま利用できます）", "Configure cloud TTS API keys (OpenAI / ElevenLabs) for Audiobook conversion. (macOS voices and Neural voices work for free without an API key.)"))
                         .foregroundStyle(.secondary)
                 }
 
-                GroupBox(model.t("音声変換のおすすめ API 接続 (Audio Lab)", "Recommended TTS APIs for Audio Lab")) {
+                GroupBox(model.t("クラウド音声 API (オプション)", "Cloud TTS APIs (Optional)")) {
                     VStack(alignment: .leading, spacing: 14) {
-                        Text(model.t("APIキーを設定すると、「音声変換 (Audio Lab)」の音声モデル一覧からクラウド高音質音声を直接選択できます。（※ Edge TTS は API キー不要・無料で利用できます）", "Once configured, cloud voices appear directly in Audio Lab's Voice Model picker. (Edge TTS works for free without an API key.)"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Divider()
-
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Label("OpenAI TTS (gpt-4o-mini-tts / tts-1)", systemImage: "waveform.circle")
@@ -3535,85 +3527,6 @@ struct ContentView: View {
                     }
                     .padding(8)
                 }
-
-                GroupBox("ローカル LLM (Ollama)") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(model.t("※ 音声読み上げ自体は macOS say / Edge TTS / クラウドTTS API で動作するため、Ollama は未設定でも音声変換できます（今後のテキスト整形・要約用）。", "Note: Audio Lab uses macOS say, Edge TTS, or cloud TTS APIs for speech synthesis; Ollama is optional (for future text prep/summarization)."))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Ollama")
-                                    .font(.headline)
-                                Text(model.ollamaStatusMessage)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("再読み込み", systemImage: "arrow.clockwise") {
-                                model.refreshOllamaModels()
-                            }
-                            .disabled(model.isRefreshingOllama)
-                        }
-
-                        if model.isRefreshingOllama {
-                            ProgressView("読み込み中...").controlSize(.small)
-                        } else if !model.ollamaModels.isEmpty {
-                            Picker("利用モデル", selection: $model.selectedOllamaModelName) {
-                                ForEach(model.ollamaModels) { item in
-                                    Text(item.name).tag(item.name)
-                                }
-                            }
-                            if let selected = model.ollamaModels.first(where: { $0.name == model.selectedOllamaModelName }) {
-                                GroupBox {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        if let family = selected.details?.family {
-                                            LabeledContent("ファミリー", value: family)
-                                        }
-                                        if let params = selected.details?.parameter_size {
-                                            LabeledContent("パラメータ数", value: params)
-                                        }
-                                        if let quant = selected.details?.quantization_level {
-                                            LabeledContent("量子化", value: quant)
-                                        }
-                                        if let size = selected.size {
-                                            LabeledContent("サイズ", value: ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
-                                        }
-                                        HStack(spacing: 10) {
-                                            Button("推論テスト", systemImage: "waveform.path.ecg") {
-                                                model.testOllamaInference()
-                                            }
-                                            .disabled(model.isTestingOllama)
-                                            if model.isTestingOllama {
-                                                ProgressView().controlSize(.small)
-                                            } else if !model.ollamaTestOutput.isEmpty {
-                                                Text(model.ollamaTestOutput)
-                                                    .font(.caption)
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                        }
-                                    }
-                                    .padding(4)
-                                }
-                            }
-                        }
-
-                        Divider()
-
-                        HStack(spacing: 8) {
-                            TextField("モデル名 (例: gemma3:4b, qwen2.5:7b)", text: $model.ollamaPullName)
-                                .textFieldStyle(.roundedBorder)
-                            Button("ダウンロード (pull)") {
-                                model.pullOllamaModel(model.ollamaPullName)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(model.isRunning || model.ollamaPullName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
-                    }
-                    .padding(8)
-                }
-
-                logBox(minHeight: 160)
             }
             .padding(28)
         }
@@ -3673,7 +3586,6 @@ struct ContentView: View {
 
                 HStack(spacing: 10) {
                     Button(model.t("再診断", "Re-check"), systemImage: "arrow.clockwise") {
-                        model.refreshOllamaModels()
                         model.refreshRuntimeChecks()
                     }
 
