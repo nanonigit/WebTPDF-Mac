@@ -291,6 +291,7 @@ final class AppModel: ObservableObject {
     @Published private var readerVerificationProgress: ReaderVerificationProgress?
     @Published private(set) var historyPageCountMessages: [UUID: String] = [:]
     @Published private(set) var libraryPDFWarnings: [String: String] = [:]
+    @Published var queuePageIndex: Int = 0
     @Published var historyPageIndex: Int = 0
     @Published var isUpdatingApp: Bool = false
     @Published private(set) var lastUpdateCheckAt = UserDefaults.standard.object(forKey: "lastUpdateCheckAt") as? Date
@@ -745,10 +746,18 @@ final class AppModel: ObservableObject {
 
     func removeQueueItem(_ id: UUID) {
         pdfQueue.removeAll { $0.id == id && $0.status != .running }
+        let totalPages = max(1, (pdfQueue.count + 9) / 10)
+        if queuePageIndex >= totalPages {
+            queuePageIndex = max(0, totalPages - 1)
+        }
     }
 
     func clearFinishedQueueItems() {
         pdfQueue.removeAll { $0.status == .completed || $0.status == .failed }
+        let totalPages = max(1, (pdfQueue.count + 9) / 10)
+        if queuePageIndex >= totalPages {
+            queuePageIndex = max(0, totalPages - 1)
+        }
     }
 
     func recordURLFetchHistory(
@@ -3053,15 +3062,24 @@ struct ContentView: View {
     }
 
     private var queueSection: some View {
-        GroupBox(model.t("実行キュー (\(model.pdfQueue.count)件)", "Execution Queue (\(model.pdfQueue.count))")) {
+        let pageSize = 10
+        let totalCount = model.pdfQueue.count
+        let totalPages = max(1, (totalCount + pageSize - 1) / pageSize)
+        let currentPage = min(max(0, model.queuePageIndex), totalPages - 1)
+        let startIdx = currentPage * pageSize
+        let endIdx = min(totalCount, startIdx + pageSize)
+        let pageIndices = startIdx < endIdx ? Array(startIdx..<endIdx) : []
+
+        return GroupBox(model.t("実行キュー (\(model.pdfQueue.count)件)", "Execution Queue (\(model.pdfQueue.count))")) {
             VStack(alignment: .leading, spacing: 10) {
-                if model.pdfQueue.isEmpty {
+                if pageIndices.isEmpty {
                     Text(model.t("URLとページ送り方向（← / →）を選んで「＋ キューに追加」を押すと、順番に自動でPDF化できます。", "Choose a URL and arrow direction (← / →), then click '+ Add to Queue' to process them sequentially."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 4)
                 } else {
-                    ForEach($model.pdfQueue) { $item in
+                    ForEach(pageIndices, id: \.self) { index in
+                        let item = model.pdfQueue[index]
                         HStack(spacing: 10) {
                             Image(systemName: queueStatusSymbol(item.status))
                                 .foregroundStyle(queueStatusColor(item.status))
@@ -3072,7 +3090,7 @@ struct ContentView: View {
                                 .truncationMode(.middle)
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                            Picker("", selection: $item.direction) {
+                            Picker("", selection: $model.pdfQueue[index].direction) {
                                 ForEach(AppModel.PageTurnDirection.allCases) { dir in
                                     Text(dir.label).tag(dir)
                                 }
@@ -3106,9 +3124,33 @@ struct ContentView: View {
                             .buttonStyle(.borderless)
                             .disabled(item.status == .running)
                         }
-                        if item.id != model.pdfQueue.last?.id {
+                        if index < endIdx - 1 {
                             Divider()
                         }
+                    }
+
+                    if totalPages > 1 {
+                        Divider()
+                        HStack {
+                            Button(model.t("前へ", "Previous")) {
+                                model.queuePageIndex = max(0, currentPage - 1)
+                            }
+                            .disabled(currentPage == 0)
+
+                            Spacer()
+
+                            Text("\(currentPage + 1) / \(totalPages)（\(startIdx + 1)〜\(endIdx)件 / 全\(totalCount)件）")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            Spacer()
+
+                            Button(model.t("次へ", "Next")) {
+                                model.queuePageIndex = min(totalPages - 1, currentPage + 1)
+                            }
+                            .disabled(currentPage >= totalPages - 1)
+                        }
+                        .padding(.top, 4)
                     }
 
                     HStack(spacing: 10) {
