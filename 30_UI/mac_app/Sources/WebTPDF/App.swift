@@ -1291,7 +1291,7 @@ final class AppModel: ObservableObject {
                 ok: pythonPath != nil,
                 detail: pythonPath ?? t("未検出", "Not found"),
                 actionTitle: t("導入/更新", "Install/Update"),
-                actionShell: "\"\(py)\" -m pip install --upgrade requests beautifulsoup4 pypdf pymupdf playwright pillow && \"\(py)\" -m playwright install chromium"
+                actionShell: "\"\(py)\" -m pip install --upgrade requests beautifulsoup4 pypdf pymupdf playwright pillow edge-tts && \"\(py)\" -m playwright install chromium"
             ),
             RuntimeCheckItem(
                 id: "chrome",
@@ -1334,21 +1334,10 @@ final class AppModel: ObservableObject {
         let py = resolvePythonCommand() ?? "python3"
         let script = """
         set -e
-        "\(py)" -m pip install --upgrade requests beautifulsoup4 pypdf pymupdf playwright pillow
+        "\(py)" -m pip install --upgrade requests beautifulsoup4 pypdf pymupdf playwright pillow edge-tts
         "\(py)" -m playwright install chromium
         if command -v "\(brewPath)" >/dev/null 2>&1; then
           "\(brewPath)" list ffmpeg >/dev/null 2>&1 && "\(brewPath)" upgrade ffmpeg || "\(brewPath)" install ffmpeg || true
-          if ! curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-            if ! command -v ollama >/dev/null 2>&1; then
-              "\(brewPath)" install ollama || true
-            fi
-            if [ -d "/Applications/Ollama.app" ]; then
-              open -a Ollama
-            elif command -v ollama >/dev/null 2>&1; then
-              nohup ollama serve >/tmp/webtpdf_ollama.log 2>&1 &
-            fi
-            for i in {1..16}; do curl -sf http://127.0.0.1:11434/api/tags >/dev/null && break; sleep 0.5; done
-          fi
         fi
         """
         runMaintenanceShell(title: t("必要パッケージ一括導入/更新", "Install/Update Dependencies"), shellScript: script)
@@ -3425,7 +3414,7 @@ struct ContentView: View {
                     Image(systemName: "chevron.right").foregroundStyle(.secondary)
 
                     let selectedModel = model.availableTTSModels.first(where: { $0.id == model.selectedTTSModelID })
-                    let modelReady = selectedModel?.installed ?? false
+                    let modelReady = (selectedModel?.installed ?? false) || (selectedModel?.engine == "edge") || (selectedModel?.engine == "say")
                     Button {
                         let models = model.availableTTSModels
                         if let idx = models.firstIndex(where: { $0.id == model.selectedTTSModelID }), !models.isEmpty {
@@ -4253,34 +4242,40 @@ struct ContentView: View {
     }
 
     private var localModelSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Picker("③ 音声モデル", selection: $model.selectedTTSModelID) {
+        let selected = model.availableTTSModels.first(where: { $0.id == model.selectedTTSModelID })
+        let requiresAPIKey = (selected?.engine == "openai" || selected?.engine == "elevenlabs") && !(selected?.installed ?? false)
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Picker(model.t("③ 音声モデル", "③ Voice Model"), selection: $model.selectedTTSModelID) {
                     ForEach(model.availableTTSModels) { item in
-                        Text(item.installed ? "\(item.name) [済]" : "\(item.name) [未DL]")
+                        let needsKey = (item.engine == "openai" || item.engine == "elevenlabs") && !item.installed
+                        Text(needsKey ? "\(item.name) [APIキー未設定]" : item.name)
                             .tag(item.id)
                     }
                 }
 
-                Button("モデルDL") {
-                    model.downloadModelTarget(model.selectedTTSModelID)
+                if requiresAPIKey {
+                    Button(model.t("APIキーを設定", "Configure API Key")) {
+                        settingsTab = .models
+                        destination = .settings
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
                 }
-                .disabled(model.isRunning)
             }
 
-            HStack(spacing: 8) {
-                TextField("新しいモデルURL (https://... .zip / .onnx 等)", text: $model.customModelURLText)
-                    .textFieldStyle(.roundedBorder)
-
-                Button("URLからモデルDL") {
-                    model.downloadModelTarget(model.customModelURLText)
+            if let selected {
+                HStack(spacing: 8) {
+                    Text(model.t("エンジン: \(selected.engine) · 言語: \(selected.language)", "Engine: \(selected.engine) · Language: \(selected.language)"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if requiresAPIKey {
+                        Text(model.t("※ クラウド音声を使うには「AI接続」でAPIキーを入力してください", "※ Enter your API key in AI Connection to use this cloud voice"))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
-                .disabled(model.isRunning || model.customModelURLText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            if let selected = model.availableTTSModels.first(where: { $0.id == model.selectedTTSModelID }) {
-                Text(model.t("エンジン: \(selected.engine) · 言語: \(selected.language)", "Engine: \(selected.engine) · Language: \(selected.language)"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .padding(10)
