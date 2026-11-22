@@ -3734,13 +3734,10 @@ struct ContentView: View {
         VisibleScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(spacing: 12) {
-                    Button("URL → PDF 作成を開く") { destination = .urlToPDF }
+                    Button(Destination.urlToPDF.title(model.uiLanguage)) { destination = .urlToPDF }
                         .buttonStyle(.borderedProminent)
-                    Button("音声変換を開く") { destination = .audioLab }
-                    Button(model.t("システム設定を開く", "Open Settings")) {
-                        settingsTab = .runtime
-                        destination = .settings
-                    }
+                    Button(Destination.audioLab.title(model.uiLanguage)) { destination = .audioLab }
+                    Button(Destination.pdfSqueezer.title(model.uiLanguage)) { destination = .pdfSqueezer }
                     Spacer()
                     updateAppButton
                 }
