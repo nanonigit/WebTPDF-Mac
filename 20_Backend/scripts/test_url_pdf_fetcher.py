@@ -738,6 +738,25 @@ class UrlPdfFetcherTests(unittest.TestCase):
             )
         self.assertFalse(out_pdf.exists())
 
+    def test_loading_or_error_detection_and_verify_exported_pdf(self) -> None:
+        import fitz
+
+        pdf_path = self.root / "loading_check.pdf"
+        doc = fitz.open()
+        p1 = doc.new_page(width=400, height=500)
+        p1.insert_text((50, 100), "Chapter 1: Valid Content")
+        p2 = doc.new_page(width=400, height=500)
+        p2.insert_text((50, 100), "Hang tight. This\u2019ll take just a sec.")
+        doc.save(str(pdf_path))
+        doc.close()
+
+        self.assertTrue(fetcher.is_pdf_loading_or_error(pdf_path.read_bytes()))
+        qc = fetcher.verify_exported_pdf(pdf_path, expected_pages=5, captured_steps=2)
+        self.assertEqual(qc["status"], "WARN")
+        self.assertEqual(qc["loading_pages"], [2])
+        self.assertIn("ページ不足(2/5p)", qc["summary"])
+        self.assertIn("読込/エラー画面混入(p.2)", qc["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

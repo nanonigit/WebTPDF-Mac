@@ -552,6 +552,38 @@ def is_pdf_visually_blank(pdf_bytes: bytes) -> bool:
         return False
 
 
+LOADING_OR_ERROR_PHRASES: tuple[str, ...] = (
+    "hang tight",
+    "this'll take just a sec",
+    "this\u2019ll take just a sec",
+    "oops... something went wrong",
+)
+
+
+def page_has_loading_or_error_text(text: str) -> bool:
+    """Return True if a page text contains a known loading placeholder or reader error screen."""
+    low = (text or "").lower()
+    if any(ph in low for ph in LOADING_OR_ERROR_PHRASES):
+        return True
+    if "something went wrong" in low and "back to library" in low:
+        return True
+    return False
+
+
+def is_pdf_loading_or_error(pdf_bytes: bytes) -> bool:
+    """Return True if any page in the captured PDF bytes contains loading or error screen text."""
+    try:
+        import fitz
+
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            for pg in doc:
+                if page_has_loading_or_error_text(pg.get_text() or ""):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def capture_fixed_layout_pf_pages(page, cdp_session=None) -> bytes | None:
     """Capture each .pf fixed-layout page via element screenshot so scaled/absolute layouts never clip."""
     pfs = page.locator(".pf")
@@ -787,6 +819,7 @@ def verify_exported_pdf(
     pdf_path: Path,
     expected_pages: int | None = None,
     last_percent: int | None = None,
+    captured_steps: int | None = None,
 ) -> dict:
     """Verify exported PDF for page count, blank pages, edge clipping, and readability margins."""
     import pymupdf
@@ -796,9 +829,12 @@ def verify_exported_pdf(
         page_count = len(doc)
         blank_pages: list[int] = []
         clipped_pages: list[int] = []
+        loading_pages: list[int] = []
         min_margin_ratio = 1.0
 
         for idx, page in enumerate(doc):
+            if page_has_loading_or_error_text(page.get_text() or ""):
+                loading_pages.append(idx + 1)
             pix = page.get_pixmap(dpi=72)
             w, h = pix.width, pix.height
             if w <= 0 or h <= 0:
@@ -829,12 +865,15 @@ def verify_exported_pdf(
                         clipped_pages.append(idx + 1)
 
         warnings: list[str] = []
-        if expected_pages is not None and page_count < expected_pages:
-            warnings.append(f"ページ不足({page_count}/{expected_pages}p)")
+        effective_count = captured_steps if captured_steps is not None else page_count
+        if expected_pages is not None and effective_count < expected_pages:
+            warnings.append(f"ページ不足({effective_count}/{expected_pages}p)")
         elif last_percent is not None and last_percent < 95:
             warnings.append(f"途中終了の疑い(進行率{last_percent}%)")
         if blank_pages:
             warnings.append(f"空白ページ({len(blank_pages)}p)")
+        if loading_pages:
+            warnings.append(f"読込/エラー画面混入(p.{','.join(str(p) for p in loading_pages[:5])})")
         if clipped_pages:
             warnings.append(f"端切れ/はみ出し疑い({len(clipped_pages)}p)")
         if page_count > 1 and min_margin_ratio < 0.02:
@@ -852,6 +891,7 @@ def verify_exported_pdf(
             "page_count": page_count,
             "expected_pages": expected_pages,
             "blank_pages": blank_pages,
+            "loading_pages": loading_pages,
             "clipped_pages": clipped_pages,
             "min_margin_ratio": min_margin_ratio,
             "summary": summary,
@@ -1583,6 +1623,7 @@ def wait_for_page_ready(page, timeout_ms: int = 12000) -> None:
                 const loadingPhrases = [
                     'hang tight',
                     "this'll take just a sec",
+                    "this\u2019ll take just a sec",
                     'loading...',
                     '読み込み中',
                 ];
@@ -2116,6 +2157,7 @@ def fetch_via_browser(
                 ]
 
             collected_page_pdfs = [capture.pdf for capture in saved_pages]
+            skipped_blank_steps = 0
             prev_hash: str | None = None
             prev_pdf_hash: str | None = None
             last_reader_page: int | None = None
@@ -2216,11 +2258,73 @@ def fetch_via_browser(
                         if is_reader_oops(page):
                             continue
                 else:
-                    wait_for_page_ready(page, timeout_ms=12000)
+                    wait_for_page_ready(page, timeout_ms=15000)
+                    for _ in range(3):
+                        try:
+                            body_low = (page.inner_text("body") or "").lower()
+                        except Exception:
+                            body_low = ""
+                        if not any(ph in body_low for ph in ("hang tight", "this'll take just a sec", "this\u2019ll take just a sec", "loading...")):
+                            break
+                        log(f"[Browser] Page {page_idx} still loading; waiting 3s...")
+                        page.wait_for_timeout(3000)
+                        wait_for_page_ready(page, timeout_ms=10000)
+                    if expected_total_pages is None and "learning.oreilly.com" in (page.url or ""):
+                        m_book = re.search(r"learning\.oreilly\.com/library/view/[^/]+/(\d+)", page.url or "")
+                        if m_book:
+                            try:
+                                spine_total = page.evaluate(
+                                    """async (bid) => {
+                                        try {
+                                            const r = await fetch('/api/v2/epubs/urn:orm:book:' + encodeURIComponent(bid) + '/');
+                                            if (!r.ok) return null;
+                                            const d = await r.json();
+                                            if (typeof d.spine === 'string') {
+                                                const sr = await fetch(d.spine);
+                                                if (sr.ok) {
+                                                    const sd = await sr.json();
+                                                    if (typeof sd.count === 'number' && sd.count > 0) return sd.count;
+                                                }
+                                            }
+                                            if (typeof d.page_count === 'number' && d.page_count > 0) return d.page_count;
+                                        } catch (e) {}
+                                        return null;
+                                    }""",
+                                    m_book.group(1),
+                                )
+                                if isinstance(spine_total, int) and spine_total > 0:
+                                    expected_total_pages = spine_total
+                            except Exception:
+                                pass
                 png_bytes = page.screenshot(full_page=False, timeout=15000)
                 current_hash = hashlib.sha256(png_bytes).hexdigest()
 
                 if prev_hash == current_hash:
+                    if not reader_mode:
+                        for retry_idx in range(2):
+                            log(f"[Browser] Page {page_idx} unchanged; retrying turn ({retry_idx + 1}/2)...")
+                            page.keyboard.press(turn_key)
+                            page.wait_for_timeout(1800)
+                            wait_for_page_ready(page, timeout_ms=10000)
+                            png_retry = page.screenshot(full_page=False, timeout=15000)
+                            retry_hash = hashlib.sha256(png_retry).hexdigest()
+                            if retry_hash == prev_hash:
+                                for selector in arrow_button_selectors:
+                                    locator = page.locator(selector).first
+                                    try:
+                                        if locator.count() > 0 and locator.is_visible():
+                                            locator.click(timeout=3000)
+                                            page.wait_for_timeout(1800)
+                                            wait_for_page_ready(page, timeout_ms=10000)
+                                            break
+                                    except Exception:
+                                        continue
+                                png_retry = page.screenshot(full_page=False, timeout=15000)
+                                retry_hash = hashlib.sha256(png_retry).hexdigest()
+                            if retry_hash != prev_hash:
+                                png_bytes = png_retry
+                                current_hash = retry_hash
+                                break
                     if reader_mode:
                         # Retry page turn on slow networks / chapter boundaries before stopping
                         max_turn_retries = 3 if (expected_total_pages and last_reader_page and last_reader_page < expected_total_pages) else 2
@@ -2301,6 +2405,36 @@ def fetch_via_browser(
                     page_pdf_bytes = capture_page_as_pdf_bytes(page, cdp_session=cdp_session)
                 if reader_mode and is_reader_oops(page):
                     continue
+                if is_pdf_loading_or_error(page_pdf_bytes):
+                    for retry in range(4):
+                        log(f"[Browser] Page {page_idx} rendered loading/error screen; waiting and re-capturing ({retry + 1}/4)...")
+                        page.wait_for_timeout(3000)
+                        if retry == 2 and not reader_mode:
+                            try:
+                                page.reload(wait_until="domcontentloaded", timeout=15000)
+                            except Exception:
+                                pass
+                        wait_for_page_ready(page, timeout_ms=12000)
+                        if reader_mode:
+                            if is_reader_oops(page):
+                                break
+                            retry_capture = capture_reader_page_as_pdf_bytes(page)
+                            if retry_capture is not None:
+                                page_pdf_bytes, reader_png = retry_capture
+                            else:
+                                continue
+                        else:
+                            page_pdf_bytes = capture_page_as_pdf_bytes(page, cdp_session=cdp_session)
+                        if not is_pdf_loading_or_error(page_pdf_bytes) and not is_pdf_visually_blank(page_pdf_bytes):
+                            break
+                    if reader_mode and is_reader_oops(page):
+                        continue
+                    if is_pdf_loading_or_error(page_pdf_bytes):
+                        if reader_mode and last_reader_image_hash is not None:
+                            needs_recovery = True
+                            continue
+                        log(f"[Browser] Page {page_idx} remained on loading/error screen after retries; discarding and stopping.")
+                        break
                 if is_pdf_visually_blank(page_pdf_bytes):
                     for retry in range(2):
                         log(f"[Browser] Page {page_idx} rendered blank; waiting and retrying ({retry + 1}/2)...")
@@ -2329,10 +2463,29 @@ def fetch_via_browser(
                                 "ページの描画が空（白紙）のままだったためPDFを作成できませんでした。"
                                 "ログイン状態やページ読み込みを確認して再実行してください。"
                             )
+                        url_before_skip = page.url
+                        page.keyboard.press(turn_key)
+                        page.wait_for_timeout(1200)
+                        wait_for_page_ready(page, timeout_ms=10000)
+                        if page.url != url_before_skip:
+                            skipped_blank_steps += 1
+                            log(f"[Browser] Page {page_idx} was intentionally blank ({url_before_skip.rsplit('/', 1)[-1]}); skipping to next page.")
+                            continue
                         log(f"[Browser] Page {page_idx} remained blank after retry; stopping pagination.")
                         break
                 current_pdf_hash = pdf_content_signature(page_pdf_bytes)
                 if prev_pdf_hash == current_pdf_hash:
+                    if not reader_mode:
+                        for pdf_retry in range(2):
+                            log(f"[Browser] Page {page_idx} PDF content unchanged; retrying turn ({pdf_retry + 1}/2)...")
+                            page.keyboard.press(turn_key)
+                            page.wait_for_timeout(2000)
+                            wait_for_page_ready(page, timeout_ms=10000)
+                            page_pdf_bytes = capture_page_as_pdf_bytes(page, cdp_session=cdp_session)
+                            current_pdf_hash = pdf_content_signature(page_pdf_bytes)
+                            if current_pdf_hash != prev_pdf_hash and not is_pdf_visually_blank(page_pdf_bytes):
+                                break
+                            current_pdf_hash = prev_pdf_hash
                     if reader_mode:
                         for pdf_retry in range(2):
                             log(f"[Reader] Page {page_idx} PDF content unchanged; retrying turn ({pdf_retry + 1}/2)...")
@@ -2452,14 +2605,19 @@ def fetch_via_browser(
                         result_details["verifiedPages"] = written
             else:
                 written = merge_pdf_bytes_list(collected_page_pdfs, resolved_output)
+            captured_steps = len(collected_page_pdfs) + skipped_blank_steps
             try:
                 qc = verify_exported_pdf(
                     resolved_output,
                     expected_pages=expected_total_pages if last_reader_page != expected_total_pages else None,
                     last_percent=last_reader_percent,
+                    captured_steps=captured_steps if not reader_mode else None,
                 )
                 log(f"[Verify] {qc['summary']}")
                 log(f"QUALITY_CHECK={qc['summary']}")
+                if result_details is not None:
+                    if qc.get("loading_pages"):
+                        result_details["loadingPages"] = len(qc["loading_pages"])
             except Exception as qc_exc:
                 log(f"[Verify] Skipped ({qc_exc})")
             if reader_mode and reader_checkpoint is not None:
@@ -2469,6 +2627,8 @@ def fetch_via_browser(
                 if last_reader_page == expected_total_pages:
                     result_details["lastPrintedPage"] = last_reader_page
                     result_details["unverifiedGaps"] = 0
+                elif not reader_mode:
+                    result_details["lastPrintedPage"] = captured_steps
             return written, resolved_output
         finally:
             if created_page:
@@ -2597,19 +2757,13 @@ def main() -> int:
                 else:
                     log("[Fetch] No static PDF links found. Trying headless browser...")
                     total_pages, final_path = fetch_via_browser(
-                        url=args.url.strip(),
-                        output_path=output_path,
-                        max_pages=max(1, args.max_pages),
-                        timeout=max(5, args.timeout),
-                        direction=args.direction,
-                        auto_name=True,
-                    ) if False else fetch_via_browser(
                         args.url.strip(),
                         output_path,
                         max_pages=max(1, args.max_pages),
                         timeout=max(5, args.timeout),
                         direction=args.direction,
                         auto_name=True,
+                        result_details=result_details,
                     )
         else:
             total_pages = fetch_and_merge(

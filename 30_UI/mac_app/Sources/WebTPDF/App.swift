@@ -157,19 +157,27 @@ final class AppModel: ObservableObject {
         let errorMessage: String?
         var pageCount: Int?
         var expectedPages: Int?
-        let lastPrintedPage: Int?
+        var lastPrintedPage: Int?
         let unverifiedGaps: Int?
         let verifiedPages: Int?
+        var loadingPages: Int?
 
         var isReaderSite: Bool {
             URL(string: url)?.host?.lowercased().hasPrefix("read.amazon.") == true
         }
 
+        var isIncomplete: Bool {
+            guard let expectedPages else { return false }
+            let actual = lastPrintedPage ?? pageCount
+            guard let actual else { return false }
+            return actual < expectedPages
+        }
+
         var hasWarning: Bool {
             guard succeeded else { return true }
-            if let unverifiedGaps { return unverifiedGaps > 0 }
-            guard let pageCount, let expectedPages else { return false }
-            return pageCount < expectedPages
+            if let loadingPages, loadingPages > 0 { return true }
+            if let unverifiedGaps, unverifiedGaps > 0 { return true }
+            return isIncomplete
         }
     }
 
@@ -190,6 +198,7 @@ final class AppModel: ObservableObject {
         let lastPrintedPage: Int?
         let unverifiedGaps: Int?
         let verifiedPages: Int?
+        let loadingPages: Int?
         let message: String?
     }
 
@@ -282,6 +291,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var checkingHistoryPageCount: UUID?
     @Published private var readerVerificationProgress: ReaderVerificationProgress?
     @Published private(set) var historyPageCountMessages: [UUID: String] = [:]
+    @Published private(set) var libraryPDFWarnings: [String: String] = [:]
     @Published var historyPageIndex: Int = 0
     @Published var isUpdatingApp: Bool = false
     @Published private(set) var lastUpdateCheckAt = UserDefaults.standard.object(forKey: "lastUpdateCheckAt") as? Date
@@ -752,7 +762,8 @@ final class AppModel: ObservableObject {
         expectedPages: Int? = nil,
         lastPrintedPage: Int? = nil,
         unverifiedGaps: Int? = nil,
-        verifiedPages: Int? = nil
+        verifiedPages: Int? = nil,
+        loadingPages: Int? = nil
     ) {
         let entry = URLFetchHistoryItem(
             id: UUID(),
@@ -766,7 +777,8 @@ final class AppModel: ObservableObject {
             expectedPages: expectedPages,
             lastPrintedPage: lastPrintedPage,
             unverifiedGaps: unverifiedGaps,
-            verifiedPages: verifiedPages
+            verifiedPages: verifiedPages,
+            loadingPages: loadingPages
         )
         urlFetchHistory.removeAll { $0.url == url && $0.direction == direction }
         urlFetchHistory.insert(entry, at: 0)
@@ -781,31 +793,54 @@ final class AppModel: ObservableObject {
         let result = (error as? URLFetchInterrupted)?.result
         recordURLFetchHistory(
             url: url, direction: direction, outputURL: nil, succeeded: false,
-            errorMessage: error.localizedDescription, pageCount: result?.pageCount, expectedPages: result?.expectedPages
+            errorMessage: error.localizedDescription, pageCount: result?.pageCount, expectedPages: result?.expectedPages,
+            lastPrintedPage: result?.lastPrintedPage, loadingPages: result?.loadingPages
         )
     }
 
+    nonisolated private static func countLoadingOrErrorPages(in doc: PDFDocument) -> Int {
+        var loadingCount = 0
+        for idx in 0..<doc.pageCount {
+            guard let text = doc.page(at: idx)?.string?.lowercased(), !text.isEmpty else { continue }
+            if text.contains("hang tight")
+                || text.contains("this'll take just a sec")
+                || text.contains("this\u{2019}ll take just a sec")
+                || text.contains("oops... something went wrong")
+                || (text.contains("something went wrong") && text.contains("back to library")) {
+                loadingCount += 1
+            }
+        }
+        return loadingCount
+    }
+
     func backfillHistoryPDFPageCounts() {
-        let missing = urlFetchHistory.compactMap { entry -> (UUID, String)? in
-            guard entry.pageCount == nil, let path = entry.outputPath else { return nil }
+        let targets = urlFetchHistory.compactMap { entry -> (UUID, String)? in
+            guard (entry.pageCount == nil || entry.loadingPages == nil), let path = entry.outputPath else { return nil }
             return (entry.id, path)
         }
-        guard !missing.isEmpty else { return }
+        guard !targets.isEmpty else { return }
         Task {
-            let counts = await Task.detached(priority: .utility) {
-                var result: [UUID: Int] = [:]
-                for (id, path) in missing {
-                    if let count = PDFDocument(url: URL(fileURLWithPath: path))?.pageCount, count > 0 {
-                        result[id] = count
+            let scanned = await Task.detached(priority: .utility) {
+                var result: [UUID: (Int, Int)] = [:]
+                for (id, path) in targets {
+                    if let doc = PDFDocument(url: URL(fileURLWithPath: path)), doc.pageCount > 0 {
+                        let loadingCount = Self.countLoadingOrErrorPages(in: doc)
+                        result[id] = (doc.pageCount, loadingCount)
                     }
                 }
                 return result
             }.value
             var changed = false
-            for index in urlFetchHistory.indices where urlFetchHistory[index].pageCount == nil {
-                if let count = counts[urlFetchHistory[index].id] {
-                    urlFetchHistory[index].pageCount = count
-                    changed = true
+            for index in urlFetchHistory.indices {
+                if let (count, loadingCount) = scanned[urlFetchHistory[index].id] {
+                    if urlFetchHistory[index].pageCount == nil {
+                        urlFetchHistory[index].pageCount = count
+                        changed = true
+                    }
+                    if urlFetchHistory[index].loadingPages != loadingCount {
+                        urlFetchHistory[index].loadingPages = loadingCount
+                        changed = true
+                    }
                 }
             }
             if changed { saveURLFetchHistory() }
@@ -990,7 +1025,7 @@ final class AppModel: ObservableObject {
                     self.fetchedPDFURL = mergedURL
                     self.fetchedFromSourceURL = item.url
                     self.outputDirectory = mergedURL.deletingLastPathComponent()
-                    self.recordURLFetchHistory(url: item.url, direction: item.direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages)
+                    self.recordURLFetchHistory(url: item.url, direction: item.direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages)
                     self.appendLog("[Queue #\(processedCount)] Saved -> \(mergedURL.path)\n")
                 case let .failure(error):
                     if !self.cancelRequested { failedCount += 1 }
@@ -1078,7 +1113,7 @@ final class AppModel: ObservableObject {
                 self.progressText = "100%"
                 self.remainingText = "00:00"
                 self.refreshLibraryPDFs()
-                self.recordURLFetchHistory(url: urlString, direction: direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages)
+                self.recordURLFetchHistory(url: urlString, direction: direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages)
                 self.appendLog("\nMerged PDF saved to: \(mergedURL.path)\n")
                 self.sendCompletionNotification(
                     title: self.t("PDF作成完了", "PDF Created"),
@@ -1230,19 +1265,8 @@ final class AppModel: ObservableObject {
         ])
         let sayOk = FileManager.default.isExecutableFile(atPath: "/usr/bin/say")
         let chromeOk = FileManager.default.isExecutableFile(atPath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-        let ollamaPath = resolveOllamaCommand()
-        let ollamaAppExists = FileManager.default.fileExists(atPath: "/Applications/Ollama.app")
-        let ollamaInstalled = (ollamaPath != nil) || ollamaAppExists
         let brewPath = findExecutable(["/opt/homebrew/bin/brew", "/usr/local/bin/brew"])
         let py = pythonPath ?? "python3"
-        let brewCmd = brewPath ?? "brew"
-        let ollamaStartCmd = ollamaAppExists
-            ? "open -a Ollama"
-            : "nohup \"\(ollamaPath ?? "ollama")\" serve >/tmp/webtpdf_ollama.log 2>&1 &"
-        let ollamaWaitCmd = "for i in {1..16}; do curl -sf http://127.0.0.1:11434/api/tags >/dev/null && break; sleep 0.5; done"
-        let ollamaActionShell = ollamaInstalled
-            ? "\(ollamaStartCmd) && \(ollamaWaitCmd)"
-            : "\"\(brewCmd)\" install ollama && nohup \"$(\"\(brewCmd)\" --prefix)/bin/ollama\" serve >/tmp/webtpdf_ollama.log 2>&1 & \(ollamaWaitCmd)"
 
         let ffmpegInstallShell = """
         if [ -x /opt/homebrew/bin/brew ] || [ -x /usr/local/bin/brew ]; then
@@ -1292,14 +1316,6 @@ final class AppModel: ObservableObject {
                 detail: ffmpegPath ?? t("未検出", "Not found"),
                 actionTitle: t(ffmpegPath == nil ? "導入" : "更新", ffmpegPath == nil ? "Install" : "Update"),
                 actionShell: ffmpegPath == nil ? ffmpegInstallShell : ffmpegUpdateShell
-            ),
-            RuntimeCheckItem(
-                id: "ollama",
-                name: t("Ollama (AI接続)", "Ollama (AI Connection)"),
-                ok: ollamaReachable,
-                detail: ollamaStatusMessage,
-                actionTitle: ollamaInstalled ? t("起動", "Launch") : t("導入", "Install"),
-                actionShell: ollamaActionShell
             ),
         ]
     }
@@ -1449,6 +1465,7 @@ final class AppModel: ObservableObject {
             case 10:
                 self.runState = .completed
                 self.statusMessage = self.t("すでに最新版です (\(currentDisplay))", "Already up to date (\(currentDisplay))")
+                self.appendLog("\n\(self.statusMessage)\n")
             case 11:
                 self.runState = .completed
                 self.statusMessage = self.t("現在の修正を含む更新版はまだありません。", "No update containing the current build is available yet.")
@@ -1475,11 +1492,31 @@ final class AppModel: ObservableObject {
 
     func refreshLibraryPDFs() {
         do {
-            libraryPDFs = try PDFLibraryPreferences.pdfs(in: libraryFolder)
+            let pdfs = try PDFLibraryPreferences.pdfs(in: libraryFolder)
+            libraryPDFs = pdfs
             libraryError = nil
+            auditLibraryPDFs(pdfs)
         } catch {
             libraryPDFs = []
+            libraryPDFWarnings = [:]
             libraryError = error.localizedDescription
+        }
+    }
+
+    private func auditLibraryPDFs(_ pdfs: [URL]) {
+        Task {
+            let warnings = await Task.detached(priority: .utility) {
+                var detected: [String: String] = [:]
+                for pdf in pdfs {
+                    guard let doc = PDFDocument(url: pdf) else { continue }
+                    let loadingCount = Self.countLoadingOrErrorPages(in: doc)
+                    if loadingCount > 0 {
+                        detected[pdf.standardizedFileURL.path] = "読込/エラー画面混入 (\(loadingCount)p)"
+                    }
+                }
+                return detected
+            }.value
+            self.libraryPDFWarnings = warnings
         }
     }
 
@@ -2148,9 +2185,16 @@ final class AppModel: ObservableObject {
             with: "_",
             options: .regularExpression
         )
-        let outputURL = fetchedPDFRoot.appendingPathComponent("\(makeJobID())_\(hostPart).pdf")
-
         let resolvedDirection = direction ?? pageTurnDirection
+        let existingOutputURL: URL? = urlFetchHistory.first {
+            $0.url == urlString && $0.direction == resolvedDirection && ($0.outputPath?.isEmpty == false)
+        }.flatMap { item in
+            guard let path = item.outputPath else { return nil }
+            let url = URL(fileURLWithPath: path)
+            return url.deletingLastPathComponent().standardizedFileURL == fetchedPDFRoot.standardizedFileURL ? url : nil
+        }
+        let outputURL = existingOutputURL ?? fetchedPDFRoot.appendingPathComponent("\(makeJobID())_\(hostPart).pdf")
+        let useAutoName = existingOutputURL == nil
         let checkpointURL: URL?
         if let host = parsed.host?.lowercased(), host.hasPrefix("read.amazon.") {
             let source = "\(resolvedDirection.rawValue)\n\(urlString)"
@@ -2175,9 +2219,11 @@ final class AppModel: ObservableObject {
                 "--output", outputURL.path,
                 "--direction", resolvedDirection.rawValue,
                 "--max-pages", String(max(1, maxPages)),
-                "--auto-name",
                 "--result-json", resultURL.path,
             ]
+            if useAutoName {
+                arguments.append("--auto-name")
+            }
             if let checkpointURL {
                 arguments += ["--reader-checkpoint", checkpointURL.path]
             }
@@ -3209,6 +3255,22 @@ struct ContentView: View {
                                     .font(.caption2)
                                     .foregroundStyle(.orange)
                                 }
+                                if let loading = entry.loadingPages, loading > 0 {
+                                    Text(model.t(
+                                        "⚠ 読込/エラー画面混入 (\(loading)p)・再ダウンロードしてください",
+                                        "⚠ Loading/error screen detected (\(loading)p) · Please re-download"
+                                    ))
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                                } else if entry.succeeded && entry.isIncomplete, let expected = entry.expectedPages {
+                                    let actual = entry.lastPrintedPage ?? entry.pageCount ?? 0
+                                    Text(model.t(
+                                        "⚠ ページ不足・途中停止 (\(actual)/\(expected))・再ダウンロードしてください",
+                                        "⚠ Incomplete capture (\(actual)/\(expected)) · Please re-download"
+                                    ))
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                                }
                                 if entry.isReaderSite && entry.expectedPages == nil && entry.pageCount != nil {
                                     if let notice = model.historyPageCountMessages[entry.id] {
                                         Text(notice)
@@ -3934,14 +3996,38 @@ struct ContentView: View {
                     } else {
                         VStack(spacing: 0) {
                             ForEach(Array(model.libraryPDFs.enumerated()), id: \.element) { idx, pdf in
+                                let historyEntry = model.historyItem(forPDF: pdf)
+                                let pdfWarning = model.libraryPDFWarnings[pdf.standardizedFileURL.path]
+                                let hasIssue = (historyEntry?.hasWarning == true) || (pdfWarning != nil)
                                 HStack(spacing: 10) {
-                                    Label(pdf.lastPathComponent, systemImage: "doc.fill")
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
+                                    Image(systemName: hasIssue ? "exclamationmark.triangle.fill" : "doc.fill")
+                                        .foregroundStyle(hasIssue ? Color.orange : Color.secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(pdf.lastPathComponent)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                        if let pdfWarning {
+                                            Text(model.t("⚠ \(pdfWarning)・再ダウンロードを推奨", "⚠ \(pdfWarning) · Re-download recommended"))
+                                                .font(.caption2)
+                                                .foregroundStyle(.orange)
+                                        } else if let historyEntry, historyEntry.hasWarning {
+                                            Text(model.t("⚠ ページ数不足または未確認区間あり・再ダウンロードを推奨", "⚠ Incomplete pages or unverified gaps · Re-download recommended"))
+                                                .font(.caption2)
+                                                .foregroundStyle(.orange)
+                                        }
+                                    }
                                     Spacer()
-                                    if let historyEntry = model.historyItem(forPDF: pdf) {
-                                        Button(model.t("再ダウンロード", "Re-download")) {
-                                            model.redownloadFromHistory(historyEntry)
+                                    if let historyEntry {
+                                        if hasIssue {
+                                            Button(model.t("再ダウンロード", "Re-download")) {
+                                                model.redownloadFromHistory(historyEntry)
+                                            }
+                                            .buttonStyle(.borderedProminent)
+                                            .tint(.orange)
+                                        } else {
+                                            Button(model.t("再ダウンロード", "Re-download")) {
+                                                model.redownloadFromHistory(historyEntry)
+                                            }
                                         }
                                     }
                                     Button(model.t("開く", "Open")) { NSWorkspace.shared.open(pdf) }
