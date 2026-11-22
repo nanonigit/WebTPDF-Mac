@@ -3956,13 +3956,6 @@ struct ContentView: View {
     private var pdfSqueezerView: some View {
         VisibleScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(model.t("PDF圧縮 (Squeezer)", "PDF Squeezer"))
-                        .font(.title2.bold())
-                    Text(model.t("PDF内の画像・ストリームを最適化してファイルサイズを大幅に軽量化します。フォルダごと一括圧縮にも対応しています。", "Optimize embedded images and streams to shrink PDF file sizes. Supports single PDFs or batch folder compression."))
-                        .foregroundStyle(.secondary)
-                }
-
                 HStack(spacing: 10) {
                     let targetMissing = model.squeezerTargetURL == nil
                     Button {
