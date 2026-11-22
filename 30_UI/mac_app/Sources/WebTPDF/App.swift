@@ -309,7 +309,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    @Published var uiLanguage: UILanguage = .ja
+    @Published var uiLanguage: UILanguage = .ja {
+        didSet {
+            refreshRuntimeChecks()
+        }
+    }
     @Published var ebookURL: URL?
     @Published var sourceURLText = ""
     @Published var pageTurnDirection: PageTurnDirection = .right
@@ -325,7 +329,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var checkingHistoryPageCount: UUID?
     @Published private var readerVerificationProgress: ReaderVerificationProgress?
     @Published private(set) var historyPageCountMessages: [UUID: String] = [:]
-    @Published private(set) var libraryPDFWarnings: [String: String] = [:]
+    @Published private(set) var libraryPDFWarnings: [String: Int] = [:]
     @Published var queuePageIndex: Int = 0
     @Published var historyPageIndex: Int = 0
     @Published var warningHistoryPageIndex: Int = 0
@@ -1568,12 +1572,12 @@ final class AppModel: ObservableObject {
     private func auditLibraryPDFs(_ pdfs: [URL]) {
         Task {
             let warnings = await Task.detached(priority: .utility) {
-                var detected: [String: String] = [:]
+                var detected: [String: Int] = [:]
                 for pdf in pdfs {
                     guard let doc = PDFDocument(url: pdf) else { continue }
                     let loadingCount = Self.countLoadingOrErrorPages(in: doc)
                     if loadingCount > 0 {
-                        detected[pdf.standardizedFileURL.path] = "読込/エラー画面混入 (\(loadingCount)p)"
+                        detected[pdf.standardizedFileURL.path] = loadingCount
                     }
                 }
                 return detected
@@ -4183,8 +4187,8 @@ struct ContentView: View {
                                         Text(pdf.lastPathComponent)
                                             .lineLimit(1)
                                             .truncationMode(.middle)
-                                        if let pdfWarning {
-                                            Text(model.t("⚠ \(pdfWarning)・再ダウンロードを推奨", "⚠ \(pdfWarning) · Re-download recommended"))
+                                        if let loadingCount = pdfWarning {
+                                            Text(model.t("⚠ 読込/エラー画面混入 (\(loadingCount)p)・再ダウンロードを推奨", "⚠ Loading/error screen (\(loadingCount)p) · Re-download recommended"))
                                                 .font(.caption2)
                                                 .foregroundStyle(.orange)
                                         } else if let historyEntry, historyEntry.hasWarning {
