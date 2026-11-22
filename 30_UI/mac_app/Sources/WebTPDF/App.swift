@@ -293,6 +293,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var libraryPDFWarnings: [String: String] = [:]
     @Published var queuePageIndex: Int = 0
     @Published var historyPageIndex: Int = 0
+    @Published var warningHistoryPageIndex: Int = 0
     @Published var isUpdatingApp: Bool = false
     @Published private(set) var lastUpdateCheckAt = UserDefaults.standard.object(forKey: "lastUpdateCheckAt") as? Date
     @Published private(set) var isRunningQueue = false
@@ -937,6 +938,36 @@ final class AppModel: ObservableObject {
             startQueue()
         } else {
             statusMessage = t("履歴からキューに追加しました (\(pdfQueue.count)件)", "Added from history to queue (\(pdfQueue.count))")
+        }
+    }
+
+    var warningHistoryItems: [URLFetchHistoryItem] {
+        urlFetchHistory.filter { entry in
+            let isCurrentlyFetching = isFetchingURL && !entry.succeeded
+                && (entry.errorMessage == "取得中..." || entry.errorMessage == "Fetching...")
+            return entry.hasWarning && !isCurrentlyFetching
+        }
+    }
+
+    func redownloadAllWarningHistoryItems() {
+        var added = 0
+        for item in warningHistoryItems {
+            let alreadyQueued = pdfQueue.contains(where: {
+                $0.url == item.url && $0.direction == item.direction
+                    && ($0.status == .pending || $0.status == .running)
+            })
+            if !alreadyQueued {
+                pdfQueue.append(PDFQueueItem(url: item.url, direction: item.direction))
+                added += 1
+            }
+        }
+        guard added > 0 else { return }
+        isQueueAutoPaused = false
+        if !isRunning {
+            statusMessage = t("エラー・要注意の\(added)件の再ダウンロードを開始しました", "Started re-download for \(added) warning item(s)")
+            startQueue()
+        } else {
+            statusMessage = t("エラー・要注意の\(added)件をキューに追加しました", "Added \(added) warning item(s) to queue")
         }
     }
 
@@ -3716,11 +3747,157 @@ struct ContentView: View {
 
                 dashboardRuntimeBox
 
+                dashboardErrorHistorySection
+
                 fetchHistorySection
 
                 logBox(minHeight: 160)
             }
             .padding(28)
+        }
+    }
+
+    private var dashboardErrorHistorySection: some View {
+        let warningItems = model.warningHistoryItems
+        let pageSize = 10
+        let totalCount = warningItems.count
+        let totalPages = max(1, (totalCount + pageSize - 1) / pageSize)
+        let currentPage = min(max(0, model.warningHistoryPageIndex), totalPages - 1)
+        let startIdx = currentPage * pageSize
+        let endIdx = min(totalCount, startIdx + pageSize)
+        let pageEntries = startIdx < endIdx ? Array(warningItems[startIdx..<endIdx]) : []
+
+        return GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                if pageEntries.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text(model.t("現在、エラーやページ不足・読込画面混入のある項目はありません。", "No failed, incomplete, or loading-screen items detected."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                } else {
+                    ForEach(Array(pageEntries.enumerated()), id: \.element.id) { idx, entry in
+                        HStack(spacing: 10) {
+                            let queueStatus = model.activeHistoryQueueStatus(entry)
+                            if queueStatus == .running {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else if queueStatus == .pending {
+                                Image(systemName: "clock")
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.outputPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? entry.url)
+                                    .font(.caption.weight(.medium))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+
+                                HStack(spacing: 8) {
+                                    Text(entry.direction.label)
+                                    if let loading = entry.loadingPages, loading > 0 {
+                                        Text(model.t("読込/エラー画面混入 (\(loading)p)", "Loading/error screen (\(loading)p)"))
+                                            .foregroundStyle(.orange)
+                                    } else if entry.succeeded && entry.isIncomplete, let expected = entry.expectedPages {
+                                        let actual = entry.lastPrintedPage ?? entry.pageCount ?? 0
+                                        Text(model.t("ページ不足・途中停止 (\(actual)/\(expected))", "Incomplete (\(actual)/\(expected))"))
+                                            .foregroundStyle(.orange)
+                                    } else if let gaps = entry.unverifiedGaps, gaps > 0 {
+                                        Text(model.t("未確認 \(gaps) 区間", "\(gaps) unchecked intervals"))
+                                            .foregroundStyle(.orange)
+                                    } else if let err = entry.errorMessage, !err.isEmpty {
+                                        Text(err)
+                                            .foregroundStyle(.orange)
+                                            .lineLimit(1)
+                                            .truncationMode(.tail)
+                                    }
+                                    Text(entry.url)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            if let path = entry.outputPath, FileManager.default.fileExists(atPath: path) {
+                                Button(model.t("開く", "Open")) {
+                                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                                }
+                            }
+
+                            Button(
+                                queueStatus == .running ? model.t("取得中…", "Fetching…")
+                                : queueStatus == .pending ? model.t("待機中", "Queued")
+                                : model.t("再ダウンロード", "Re-download")
+                            ) {
+                                model.redownloadFromHistory(entry)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                            .disabled(queueStatus != nil)
+
+                            Button {
+                                model.removeURLFetchHistoryItem(entry.id)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .help(model.t("この履歴を削除", "Delete this item"))
+                        }
+                        if idx < pageEntries.count - 1 {
+                            Divider()
+                        }
+                    }
+
+                    if totalPages > 1 {
+                        Divider()
+                        HStack {
+                            Button(model.t("前へ", "Previous")) {
+                                model.warningHistoryPageIndex = max(0, currentPage - 1)
+                            }
+                            .disabled(currentPage == 0)
+
+                            Spacer()
+
+                            Text("\(currentPage + 1) / \(totalPages)（\(startIdx + 1)〜\(endIdx)件 / 全\(totalCount)件）")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            Spacer()
+
+                            Button(model.t("次へ", "Next")) {
+                                model.warningHistoryPageIndex = min(totalPages - 1, currentPage + 1)
+                            }
+                            .disabled(currentPage >= totalPages - 1)
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+            }
+            .padding(8)
+        } label: {
+            HStack {
+                Label(
+                    model.t("要再ダウンロード・エラー項目 (\(totalCount)件)", "Needs Re-download / Errors (\(totalCount))"),
+                    systemImage: totalCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle"
+                )
+                .foregroundStyle(totalCount > 0 ? Color.orange : Color.primary)
+                Spacer()
+                if totalCount > 0 {
+                    Button(model.t("すべて再ダウンロード", "Re-download All")) {
+                        model.redownloadAllWarningHistoryItems()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                }
+            }
         }
     }
 
