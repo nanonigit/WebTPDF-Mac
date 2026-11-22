@@ -79,9 +79,13 @@ final class AppModel: ObservableObject {
         var id: String { rawValue }
 
         var label: String {
+            label(.ja)
+        }
+
+        func label(_ lang: UILanguage) -> String {
             switch self {
-            case .left: return "← 左キー"
-            case .right: return "→ 右キー"
+            case .left: return lang == .ja ? "← 左キー" : "← Left Key"
+            case .right: return lang == .ja ? "→ 右キー" : "→ Right Key"
             }
         }
     }
@@ -230,6 +234,37 @@ final class AppModel: ObservableObject {
                 return languages
             }
             return [language]
+        }
+
+        func displayName(_ lang: UILanguage) -> String {
+            guard lang == .en else { return name }
+            switch id {
+            case "macos:Kyoko":
+                return "macOS Built-in: Kyoko (Japanese · Female)"
+            case "macos:Otoya":
+                return "macOS Built-in: Otoya (Japanese · Male)"
+            case "macos:Samantha":
+                return "macOS Built-in: Samantha (English)"
+            case "edge:ja-JP-NanamiNeural":
+                return "Neural: Nanami (Japanese · Female · HQ)"
+            case "edge:ja-JP-KeitaNeural":
+                return "Neural: Keita (Japanese · Male · HQ)"
+            case "edge:en-US-JennyNeural":
+                return "Neural: Jenny (English · HQ)"
+            case "edge:en-US-AndrewMultilingualNeural":
+                return "Neural: Andrew Multilingual (Multilingual · HQ)"
+            case "openai:gpt-4o-mini-tts":
+                return "API: OpenAI gpt-4o-mini-tts (Natural · Multilingual)"
+            case "openai:tts-1":
+                return "API: OpenAI tts-1 (Fast · Low Cost)"
+            case "elevenlabs:eleven_multilingual_v2":
+                return "API: ElevenLabs Multilingual v2 (Expressive)"
+            default:
+                if name.hasPrefix("カスタム: ") {
+                    return "Custom: " + String(name.dropFirst("カスタム: ".count))
+                }
+                return name
+            }
         }
     }
 
@@ -2960,7 +2995,7 @@ struct ContentView: View {
                         topologyCard(
                             model.t("② ページ送り", "② Pagination"),
                             symbol: model.pageTurnDirection == .left ? "arrow.left.square" : "arrow.right.square",
-                            detail: model.pageTurnDirection.label,
+                            detail: model.pageTurnDirection.label(model.uiLanguage),
                             state: .ready
                         )
                     }
@@ -3019,7 +3054,7 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                             Picker(model.t("② ページ送り方向", "② Page Turn Key"), selection: $model.pageTurnDirection) {
                                 ForEach(AppModel.PageTurnDirection.allCases) { dir in
-                                    Text(dir.label).tag(dir)
+                                    Text(dir.label(model.uiLanguage)).tag(dir)
                                 }
                             }
                             .pickerStyle(.segmented)
@@ -3129,7 +3164,7 @@ struct ContentView: View {
 
                             Picker("", selection: $model.pdfQueue[index].direction) {
                                 ForEach(AppModel.PageTurnDirection.allCases) { dir in
-                                    Text(dir.label).tag(dir)
+                                    Text(dir.label(model.uiLanguage)).tag(dir)
                                 }
                             }
                             .pickerStyle(.segmented)
@@ -3176,7 +3211,12 @@ struct ContentView: View {
 
                             Spacer()
 
-                            Text("\(currentPage + 1) / \(totalPages)（\(startIdx + 1)〜\(endIdx)件 / 全\(totalCount)件）")
+                            Text(
+                                model.t(
+                                    "\(currentPage + 1) / \(totalPages)（\(startIdx + 1)〜\(endIdx)件 / 全\(totalCount)件）",
+                                    "\(currentPage + 1) / \(totalPages) (\(startIdx + 1)–\(endIdx) of \(totalCount))"
+                                )
+                            )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -3273,10 +3313,10 @@ struct ContentView: View {
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                 HStack(spacing: 8) {
-                                    Text(entry.direction.label)
+                                    Text(entry.direction.label(model.uiLanguage))
                                     if let count = entry.pageCount {
                                         if let last = entry.lastPrintedPage, let total = entry.expectedPages {
-                                            Text(model.t("PDF \(count)枚・リーダー \(last)/\(total)", "PDF \(count) pages · リーダー \(last)/\(total)"))
+                                            Text(model.t("PDF \(count)枚・リーダー \(last)/\(total)", "PDF \(count) pages · Reader \(last)/\(total)"))
                                                 .monospacedDigit()
                                         } else {
                                             let pages = entry.expectedPages.map { "\(count)/\($0)" }
@@ -3405,7 +3445,12 @@ struct ContentView: View {
 
                             Spacer()
 
-                            Text("\(currentPage + 1) / \(totalPages)（\(startIdx + 1)〜\(endIdx)件 / 全\(totalCount)件）")
+                            Text(
+                                model.t(
+                                    "\(currentPage + 1) / \(totalPages)（\(startIdx + 1)〜\(endIdx)件 / 全\(totalCount)件）",
+                                    "\(currentPage + 1) / \(totalPages) (\(startIdx + 1)–\(endIdx) of \(totalCount))"
+                                )
+                            )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -3498,7 +3543,7 @@ struct ContentView: View {
                             model.selectedTTSModelID = models[(idx + 1) % models.count].id
                         }
                     } label: {
-                        let currentName = selectedModel?.name ?? model.selectedTTSModelID
+                        let currentName = selectedModel?.displayName(model.uiLanguage) ?? model.selectedTTSModelID
                         topologyCard(
                             model.t("③ 音声モデル", "③ Voice Model"),
                             symbol: "waveform",
@@ -3616,14 +3661,14 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("実行環境の診断")
+                        Text(model.t("実行環境の診断", "Runtime Diagnostics"))
                             .font(.title2.bold())
                         Spacer()
                         Text(model.t("現在バージョン: \(model.appVersionDisplay)", "Version: \(model.appVersionDisplay)"))
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                     }
-                    Text("URLからのPDF取得・ローカル音声変換・AI連携に必要なコンポーネントの状態を確認します。")
+                    Text(model.t("URLからのPDF取得・ローカル音声変換に必要なコンポーネントの状態を確認します。", "Verify the status of components required for URL-to-PDF capture and local audiobook conversion."))
                         .foregroundStyle(.secondary)
                     if let prev = UserDefaults.standard.string(forKey: "lastUpdatedFromVersion"), !prev.isEmpty, prev != model.appVersionDisplay {
                         Text(model.t("前回のアップデート: \(prev) → \(model.appVersionDisplay)", "Last update: \(prev) → \(model.appVersionDisplay)"))
@@ -3632,7 +3677,7 @@ struct ContentView: View {
                     }
                 }
 
-                GroupBox("ランタイム診断") {
+                GroupBox(model.t("ランタイム診断", "Runtime Checks")) {
                     VStack(spacing: 0) {
                         ForEach(Array(model.runtimeChecks.enumerated()), id: \.element.id) { idx, check in
                             HStack(spacing: 10) {
@@ -3797,7 +3842,7 @@ struct ContentView: View {
                                     .truncationMode(.middle)
 
                                 HStack(spacing: 8) {
-                                    Text(entry.direction.label)
+                                    Text(entry.direction.label(model.uiLanguage))
                                     if let loading = entry.loadingPages, loading > 0 {
                                         Text(model.t("読込/エラー画面混入 (\(loading)p)", "Loading/error screen (\(loading)p)"))
                                             .foregroundStyle(.orange)
@@ -3863,7 +3908,12 @@ struct ContentView: View {
 
                             Spacer()
 
-                            Text("\(currentPage + 1) / \(totalPages)（\(startIdx + 1)〜\(endIdx)件 / 全\(totalCount)件）")
+                            Text(
+                                model.t(
+                                    "\(currentPage + 1) / \(totalPages)（\(startIdx + 1)〜\(endIdx)件 / 全\(totalCount)件）",
+                                    "\(currentPage + 1) / \(totalPages) (\(startIdx + 1)–\(endIdx) of \(totalCount))"
+                                )
+                            )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -4209,25 +4259,25 @@ struct ContentView: View {
         VisibleScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("環境・実行ログ")
+                    Text(model.t("環境・実行ログ", "Environment & Execution Logs"))
                         .font(.title2.bold())
-                    Text("直近の実行ログと出力先を確認します。")
+                    Text(model.t("直近の実行ログと出力先を確認します。", "Inspect recent execution logs and output paths."))
                         .foregroundStyle(.secondary)
                 }
 
-                GroupBox("環境ステータス") {
+                GroupBox(model.t("環境ステータス", "Environment Status")) {
                     VStack(spacing: 0) {
-                        StatusRow(title: "取得済みPDF", value: model.fetchedPDFURL?.path ?? "-", symbol: "doc.fill")
+                        StatusRow(title: model.t("取得済みPDF", "Fetched PDF"), value: model.fetchedPDFURL?.path ?? "-", symbol: "doc.fill")
                         Divider()
-                        StatusRow(title: "出力フォルダ", value: model.outputDirectory?.path ?? "-", symbol: "folder")
+                        StatusRow(title: model.t("出力フォルダ", "Output Folder"), value: model.outputDirectory?.path ?? "-", symbol: "folder")
                     }
                 }
 
                 HStack {
-                    Button("ログをコピー", systemImage: "doc.on.doc") {
+                    Button(model.t("ログをコピー", "Copy Log"), systemImage: "doc.on.doc") {
                         model.copyLogToPasteboard()
                     }
-                    Button("ログをクリア", systemImage: "trash") {
+                    Button(model.t("ログをクリア", "Clear Log"), systemImage: "trash") {
                         model.clearLog()
                     }
                 }
@@ -4334,6 +4384,7 @@ struct ContentView: View {
                     title: model.t("① 電子書籍ファイル", "① Ebook File"),
                     url: model.ebookURL,
                     buttonTitle: model.t("選択", "Choose"),
+                    clearTitle: model.t("クリア", "Clear"),
                     action: { model.chooseEbook() },
                     clearAction: model.ebookURL == nil ? nil : { model.clearEbook() }
                 )
@@ -4365,7 +4416,9 @@ struct ContentView: View {
                 Picker(model.t("③ 音声モデル", "③ Voice Model"), selection: $model.selectedTTSModelID) {
                     ForEach(model.availableTTSModels) { item in
                         let needsKey = (item.engine == "openai" || item.engine == "elevenlabs") && !item.installed
-                        Text(needsKey ? "\(item.name) [APIキー未設定]" : item.name)
+                        let baseName = item.displayName(model.uiLanguage)
+                        let suffix = model.t("[APIキー未設定]", "[API Key Not Set]")
+                        Text(needsKey ? "\(baseName) \(suffix)" : baseName)
                             .tag(item.id)
                     }
                 }
@@ -4421,19 +4474,19 @@ struct ContentView: View {
 
     private var sampleOptions: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("短い範囲だけ試す（PDF先頭ページ）", isOn: $model.sampleMode)
+            Toggle(model.t("短い範囲だけ試す（PDF先頭ページ）", "Convert only a short sample (first N pages of PDF)"), isOn: $model.sampleMode)
 
             HStack(spacing: 8) {
-                Text("先頭")
+                Text(model.t("先頭", "First"))
                     .foregroundStyle(.secondary)
                 TextField("8", text: $model.samplePageCount)
                     .frame(width: 70)
                     .disabled(!model.sampleMode)
-                Text("ページだけ変換")
+                Text(model.t("ページだけ変換", "pages only"))
                     .foregroundStyle(.secondary)
             }
 
-            Text("ONの場合、元PDFは変更せず、一時PDFを出力フォルダ内に作って変換します。")
+            Text(model.t("ONの場合、元PDFは変更せず、一時PDFを出力フォルダ内に作って変換します。", "When enabled, a temporary sample PDF is created in the output folder without modifying the original PDF."))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -4468,6 +4521,7 @@ struct FilePickerRow: View {
     let title: String
     let url: URL?
     let buttonTitle: String
+    var clearTitle: String = "Clear"
     let action: () -> Void
     var placeholder: String = "PDF / EPUB / TXT"
     var clearAction: (() -> Void)?
@@ -4484,7 +4538,7 @@ struct FilePickerRow: View {
                     .foregroundStyle(url == nil ? .secondary : .primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if let clearAction {
-                    Button("クリア", action: clearAction)
+                    Button(clearTitle, action: clearAction)
                 }
             }
         }
