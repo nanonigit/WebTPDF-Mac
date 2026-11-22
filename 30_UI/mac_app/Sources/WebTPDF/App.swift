@@ -3594,6 +3594,8 @@ struct ContentView: View {
                     }
                     .disabled(model.isRunning)
 
+                    Spacer()
+
                     updateAppButton
                         .buttonStyle(.borderedProminent)
                 }
@@ -3605,24 +3607,31 @@ struct ContentView: View {
     }
 
     private var updateAppButton: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(model.t("現在のバージョン \(model.appVersionDisplay)", "Installed version \(model.appVersionDisplay)"))
+        HStack(spacing: 10) {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(model.appVersionDisplay)
                     .monospacedDigit()
+                    .lineLimit(1)
                 if let checkedAt = model.lastUpdateCheckAt {
-                    let date = checkedAt.formatted(.dateTime.year().month().day().hour().minute())
-                    Text(model.t("最終確認 \(date)", "Last checked \(date)"))
+                    let date = checkedAt.formatted(
+                        Date.FormatStyle(date: .numeric, time: .shortened)
+                            .locale(Locale(identifier: model.uiLanguage == .ja ? "ja_JP" : "en_US"))
+                    )
+                    Text(model.t("確認: \(date)", "Checked: \(date)"))
+                        .lineLimit(1)
                 } else {
-                    Text(model.t("最終確認 未確認", "Last checked: Never"))
+                    Text(model.t("確認: 未確認", "Checked: Never"))
+                        .lineLimit(1)
                 }
             }
-            .font(.caption)
+            .font(.caption2)
             .foregroundStyle(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
 
             Button {
                 model.updateAndRelaunchApp()
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     if model.isUpdatingApp {
                         ProgressView()
                             .controlSize(.small)
@@ -3631,10 +3640,12 @@ struct ContentView: View {
                     }
                     Text(
                         model.isUpdatingApp
-                            ? model.t("アップデート中...", "Updating...")
-                            : model.t("アプリをアップデート", "Update App")
+                            ? model.t("更新中...", "Updating...")
+                            : model.t("アップデート", "Update")
                     )
+                    .lineLimit(1)
                 }
+                .fixedSize(horizontal: true, vertical: false)
             }
             .disabled(model.isRunning)
         }
