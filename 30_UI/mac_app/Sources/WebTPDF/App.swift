@@ -2786,7 +2786,6 @@ struct ContentView: View {
     }
 
     enum SettingsTab: String, CaseIterable, Identifiable {
-        case general
         case runtime
         case models
         case logs
@@ -2795,7 +2794,6 @@ struct ContentView: View {
 
         func title(_ lang: AppModel.UILanguage) -> String {
             switch self {
-            case .general: return lang == .ja ? "基本設定" : "General"
             case .runtime: return lang == .ja ? "実行環境" : "Runtime"
             case .models: return lang == .ja ? "AI接続" : "AI Connection"
             case .logs: return lang == .ja ? "ログ" : "Logs"
@@ -2805,7 +2803,7 @@ struct ContentView: View {
 
     @ObservedObject var model: AppModel
     @State private var destination: Destination? = .dashboard
-    @State private var settingsTab: SettingsTab = .general
+    @State private var settingsTab: SettingsTab = .runtime
     @State private var confirmClearRecentPDFs = false
     @FocusState private var isSourceURLFocused: Bool
 
@@ -2996,7 +2994,15 @@ struct ContentView: View {
                             .pickerStyle(.segmented)
                             .labelsHidden()
                             .frame(maxWidth: 220)
+
                             Spacer()
+
+                            Text(model.t("最大ページ送り数", "Max Page Turns"))
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            TextField("1000", text: $model.maxPagesSetting)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 85)
                         }
 
                         HStack(spacing: 10) {
@@ -3701,7 +3707,7 @@ struct ContentView: View {
                         .buttonStyle(.borderedProminent)
                     Button("音声変換を開く") { destination = .audioLab }
                     Button(model.t("システム設定を開く", "Open Settings")) {
-                        settingsTab = .general
+                        settingsTab = .runtime
                         destination = .settings
                     }
                     Spacer()
@@ -4022,29 +4028,6 @@ struct ContentView: View {
             Divider()
 
             switch settingsTab {
-            case .general:
-                VisibleScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("システム設定")
-                                .font(.title2.bold())
-                            Text(model.t("PDF取得時のページ送り上限を設定します。", "Set the maximum number of page turns for PDF capture."))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        GroupBox(model.t("PDF取得設定", "PDF Capture Settings")) {
-                            HStack {
-                                Text(model.t("最大ページ送り数", "Maximum Page Turns"))
-                                Spacer()
-                                TextField("1000", text: $model.maxPagesSetting)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 100)
-                            }
-                            .padding(8)
-                        }
-                    }
-                    .padding(28)
-                }
             case .runtime:
                 runtimeView
             case .models:
