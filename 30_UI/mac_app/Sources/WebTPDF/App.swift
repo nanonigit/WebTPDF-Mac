@@ -343,6 +343,7 @@ final class AppModel: ObservableObject {
     @Published var squeezerSplitEnabled = false
     @Published var squeezerMaxSizeMB = "10"
     @Published var squeezerOutputDirectory: URL?
+    @Published private(set) var isSqueezingPDF = false
     @Published var audioEngineMode: AudioEngineMode = .local
     @Published var availableTTSModels: [TTSModelItem] = [
         TTSModelItem(id: "macos:Kyoko", name: "macOS標準: Kyoko (日本語・女性)", engine: "say", voice: "Kyoko", language: "jpn", languages: ["jpn"], installed: true),
@@ -626,6 +627,7 @@ final class AppModel: ObservableObject {
         }
 
         cancelRequested = false
+        isSqueezingPDF = true
         runState = .running
         statusMessage = squeezerSplitEnabled
             ? t("PDFを圧縮・分割中...", "Compressing and splitting PDF(s)...")
@@ -656,6 +658,7 @@ final class AppModel: ObservableObject {
             workingDirectory: applicationSupportRoot
         ) { [weak self] exitCode in
             guard let self else { return }
+            self.isSqueezingPDF = false
             self.stopProgressClock()
             if self.cancelRequested {
                 self.runState = .idle
@@ -4239,8 +4242,20 @@ struct ContentView: View {
                         }
 
                         HStack(spacing: 10) {
-                            Button(model.squeezerSplitEnabled ? model.t("④ PDFを圧縮して分割", "④ Compress & Split PDF(s)") : model.t("④ PDFを圧縮", "④ Compress PDF(s)")) {
+                            Button {
                                 model.runPDFSqueezer()
+                            } label: {
+                                HStack(spacing: 6) {
+                                    if model.isSqueezingPDF {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    }
+                                    Text(
+                                        model.isSqueezingPDF
+                                            ? (model.squeezerSplitEnabled ? model.t("圧縮・分割中...", "Compressing & Splitting...") : model.t("圧縮中...", "Compressing..."))
+                                            : (model.squeezerSplitEnabled ? model.t("④ PDFを圧縮して分割", "④ Compress & Split PDF(s)") : model.t("④ PDFを圧縮", "④ Compress PDF(s)"))
+                                    )
+                                }
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(model.squeezerTargetURL == nil || model.isRunning)

@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import fitz  # pymupdf
+import pymupdf as fitz
 
 
 @dataclass(frozen=True)
