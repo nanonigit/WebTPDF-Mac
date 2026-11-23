@@ -3777,13 +3777,25 @@ struct ContentView: View {
     private var dashboardView: some View {
         VisibleScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                HStack(alignment: .center, spacing: 12) {
+                    Text("WebTPDF Mac")
+                        .font(.title2.bold())
+                    Text(model.appVersionDisplay)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor.opacity(0.14), in: Capsule())
+                    Spacer()
+                    updateAppButton
+                }
+
                 HStack(spacing: 12) {
                     Button(Destination.urlToPDF.title(model.uiLanguage)) { destination = .urlToPDF }
                         .buttonStyle(.borderedProminent)
                     Button(Destination.audioLab.title(model.uiLanguage)) { destination = .audioLab }
                     Button(Destination.pdfSqueezer.title(model.uiLanguage)) { destination = .pdfSqueezer }
                     Spacer()
-                    updateAppButton
                 }
 
                 dashboardRuntimeBox
