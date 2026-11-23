@@ -1002,23 +1002,40 @@ class ReaderCheckpoint:
             db.execute("INSERT INTO export_path VALUES (?)", (str(proposed),))
             return proposed
 
-    def save_resume_url(self, url: str) -> None:
+    def save_resume_url(self, url: str, skipped_steps: int = 0) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.path)) as db, db:
-            db.execute("CREATE TABLE IF NOT EXISTS resume_state (id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL)")
-            db.execute("INSERT OR REPLACE INTO resume_state (id, url) VALUES (1, ?)", (url,))
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS resume_state "
+                "(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, skipped_steps INTEGER DEFAULT 0)"
+            )
+            cols = {row[1] for row in db.execute("PRAGMA table_info(resume_state)")}
+            if "skipped_steps" not in cols:
+                db.execute("ALTER TABLE resume_state ADD COLUMN skipped_steps INTEGER DEFAULT 0")
+            db.execute(
+                "INSERT OR REPLACE INTO resume_state (id, url, skipped_steps) VALUES (1, ?, ?)",
+                (url, skipped_steps),
+            )
 
-    def load_resume_url(self) -> str | None:
+    def load_resume_state(self) -> tuple[str | None, int]:
         if not self.path.is_file():
-            return None
+            return None, 0
         try:
             with closing(sqlite3.connect(self.path)) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='resume_state'").fetchone() is None:
-                    return None
+                    return None, 0
+                cols = {row[1] for row in db.execute("PRAGMA table_info(resume_state)")}
+                if "skipped_steps" in cols:
+                    row = db.execute("SELECT url, COALESCE(skipped_steps, 0) FROM resume_state WHERE id = 1").fetchone()
+                    return (str(row[0]) if row and row[0] else None), (int(row[1]) if row else 0)
                 row = db.execute("SELECT url FROM resume_state WHERE id = 1").fetchone()
-                return str(row[0]) if row and row[0] else None
+                return (str(row[0]) if row and row[0] else None), 0
         except sqlite3.Error:
-            return None
+            return None, 0
+
+    def load_resume_url(self) -> str | None:
+        url, _ = self.load_resume_state()
+        return url
 
     def remove(self) -> None:
         self.path.unlink(missing_ok=True)
@@ -2116,12 +2133,13 @@ def fetch_via_browser(
                     log(f"[AutoName] Output filename -> {resolved_output.name}")
             book_title = detected_title if reader_mode else None
             saved_pages = saved_captures
+            restored_skipped_steps = 0
             if saved_pages:
                 log(f"[Reader] Loaded {len(saved_pages)} saved page(s); resuming capture.")
                 if reader_mode and saved_pages[-1].viewport_height is not None:
                     page.set_viewport_size({"width": 800, "height": saved_pages[-1].viewport_height})
                 elif not reader_mode and reader_checkpoint is not None:
-                    resume_url = reader_checkpoint.load_resume_url()
+                    resume_url, restored_skipped_steps = reader_checkpoint.load_resume_state()
                     if resume_url and resume_url != page.url:
                         log(f"[Browser] Jumping to saved resume URL: {resume_url}")
                         page.goto(resume_url, wait_until="domcontentloaded", timeout=timeout * 1000)
@@ -2184,7 +2202,7 @@ def fetch_via_browser(
                 ]
 
             collected_page_pdfs = [capture.pdf for capture in saved_pages]
-            skipped_blank_steps = 0
+            skipped_blank_steps = restored_skipped_steps
             prev_hash: str | None = None
             prev_pdf_hash: str | None = None
             last_reader_page: int | None = None
@@ -2529,8 +2547,16 @@ def fetch_via_browser(
                         wait_for_page_ready(page, timeout_ms=10000)
                         if page.url != url_before_skip:
                             skipped_blank_steps += 1
+                            if reader_checkpoint is not None:
+                                reader_checkpoint.save_resume_url(url_before_skip, skipped_blank_steps)
                             log(f"[Browser] Page {page_idx} was intentionally blank ({url_before_skip.rsplit('/', 1)[-1]}); skipping to next page.")
                             continue
+                        if expected_total_pages is not None:
+                            m_ch = re.search(r"chapter-(\d+)\.html", url_before_skip)
+                            if m_ch and int(m_ch.group(1)) >= expected_total_pages:
+                                skipped_blank_steps += 1
+                                log(f"[Browser] Final chapter ({url_before_skip.rsplit('/', 1)[-1]}) was intentionally blank; completing.")
+                                break
                         log(f"[Browser] Page {page_idx} remained blank after retry; stopping pagination.")
                         break
                 current_pdf_hash = pdf_content_signature(page_pdf_bytes)
@@ -2614,7 +2640,7 @@ def fetch_via_browser(
                         expected_total_pages, None, None,
                     ))
                     if page.url:
-                        reader_checkpoint.save_resume_url(page.url)
+                        reader_checkpoint.save_resume_url(page.url, skipped_blank_steps)
                 collected_page_pdfs.append(page_pdf_bytes)
                 log(f"[Browser] Captured page {page_idx} via PDF command ({len(page_pdf_bytes)} bytes)")
 
@@ -2677,6 +2703,10 @@ def fetch_via_browser(
                 current_leaf = (page.url or "").split("#")[0].split("?")[0].rstrip("/").split("/")[-1]
                 if oreilly_last_filename and current_leaf == oreilly_last_filename and captured_steps > 0:
                     expected_total_pages = captured_steps
+                elif expected_total_pages is not None and captured_steps < expected_total_pages:
+                    m_final_ch = re.search(r"chapter-(\d+)\.html", current_leaf)
+                    if m_final_ch and int(m_final_ch.group(1)) >= expected_total_pages:
+                        captured_steps = expected_total_pages
             is_complete_non_reader = (
                 expected_total_pages is None or captured_steps >= expected_total_pages
             )

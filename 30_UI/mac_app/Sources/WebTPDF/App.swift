@@ -134,15 +134,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    struct PDFQueueItem: Identifiable, Hashable {
-        enum Status: String {
+    struct PDFQueueItem: Identifiable, Codable, Hashable {
+        enum Status: String, Codable {
             case pending
             case running
             case completed
             case failed
         }
 
-        let id = UUID()
+        var id = UUID()
         var url: String
         var direction: PageTurnDirection
         var status: Status = .pending
@@ -317,7 +317,23 @@ final class AppModel: ObservableObject {
     @Published var ebookURL: URL?
     @Published var sourceURLText = ""
     @Published var pageTurnDirection: PageTurnDirection = .right
-    @Published var pdfQueue: [PDFQueueItem] = []
+    @Published var pdfQueue: [PDFQueueItem] = {
+        guard let data = UserDefaults.standard.data(forKey: "pdfQueueJSON"),
+              var decoded = try? JSONDecoder().decode([PDFQueueItem].self, from: data)
+        else {
+            return []
+        }
+        for idx in decoded.indices where decoded[idx].status == .running {
+            decoded[idx].status = .pending
+        }
+        return decoded
+    }() {
+        didSet {
+            if let encoded = try? JSONEncoder().encode(pdfQueue) {
+                UserDefaults.standard.set(encoded, forKey: "pdfQueueJSON")
+            }
+        }
+    }
     @Published var urlFetchHistory: [URLFetchHistoryItem] = {
         guard let data = UserDefaults.standard.data(forKey: "urlFetchHistoryJSON"),
               let decoded = try? JSONDecoder().decode([URLFetchHistoryItem].self, from: data)
