@@ -340,6 +340,9 @@ final class AppModel: ObservableObject {
     @Published var squeezerTargetURL: URL?
     @Published var squeezerPreset: PDFCompressionPreset = .balanced
     @Published var squeezerInPlace = false
+    @Published var squeezerSplitEnabled = false
+    @Published var squeezerMaxSizeMB = "10"
+    @Published var squeezerOutputDirectory: URL?
     @Published var audioEngineMode: AudioEngineMode = .local
     @Published var availableTTSModels: [TTSModelItem] = [
         TTSModelItem(id: "macos:Kyoko", name: "macOS標準: Kyoko (日本語・女性)", engine: "say", voice: "Kyoko", language: "jpn", languages: ["jpn"], installed: true),
@@ -579,6 +582,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func chooseSqueezerOutputDirectory() {
+        let panel = NSOpenPanel()
+        panel.title = t("分割PDFの保存先フォルダを選択", "Choose Output Folder for Split PDFs")
+        panel.prompt = t("選択", "Choose")
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = squeezerOutputDirectory ?? squeezerTargetURL?.deletingLastPathComponent() ?? fetchedPDFRoot
+        if panel.runModal() == .OK, let url = panel.url {
+            squeezerOutputDirectory = url
+        }
+    }
+
+    func resetSqueezerOutputDirectory() {
+        squeezerOutputDirectory = nil
+    }
+
     func runPDFSqueezer() {
         guard let target = squeezerTargetURL else {
             statusMessage = t("圧縮するPDFまたはフォルダを選択してください。", "Select a PDF file or folder to compress.")
@@ -594,11 +615,23 @@ final class AppModel: ObservableObject {
             return
         }
 
+        var maxSizeValue: Double?
+        if squeezerSplitEnabled {
+            let trimmed = squeezerMaxSizeMB.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let parsed = Double(trimmed), parsed > 0 else {
+                statusMessage = t("分割サイズ上限は0より大きい数値（MB）で入力してください。", "Enter a split size limit greater than 0 MB.")
+                return
+            }
+            maxSizeValue = parsed
+        }
+
         cancelRequested = false
         runState = .running
-        statusMessage = t("PDFを圧縮中...", "Compressing PDF(s)...")
+        statusMessage = squeezerSplitEnabled
+            ? t("PDFを圧縮・分割中...", "Compressing and splitting PDF(s)...")
+            : t("PDFを圧縮中...", "Compressing PDF(s)...")
         progressFraction = nil
-        progressText = t("圧縮中", "Compressing")
+        progressText = squeezerSplitEnabled ? t("圧縮・分割中", "Splitting") : t("圧縮中", "Compressing")
         remainingText = "-"
         logText = "[Squeezer] Target: \(target.path)\n"
         startProgressClock()
@@ -608,7 +641,12 @@ final class AppModel: ObservableObject {
             "--input", target.path,
             "--preset", squeezerPreset.rawValue,
         ]
-        if squeezerInPlace {
+        if let maxSizeValue {
+            args += ["--max-size-mb", String(maxSizeValue)]
+            if let outDir = squeezerOutputDirectory {
+                args += ["--output-dir", outDir.path]
+            }
+        } else if squeezerInPlace {
             args.append("--in-place")
         }
 
@@ -4045,17 +4083,32 @@ struct ContentView: View {
                     Image(systemName: "chevron.right").foregroundStyle(.secondary)
 
                     Button {
-                        model.squeezerInPlace.toggle()
+                        if model.squeezerSplitEnabled {
+                            model.squeezerSplitEnabled = false
+                            model.squeezerInPlace = false
+                        } else if !model.squeezerInPlace {
+                            model.squeezerInPlace = true
+                        } else {
+                            model.squeezerInPlace = false
+                            model.squeezerSplitEnabled = true
+                        }
                     } label: {
+                        let outputDetail: String = {
+                            if model.squeezerSplitEnabled {
+                                let mb = model.squeezerMaxSizeMB.trimmingCharacters(in: .whitespacesAndNewlines)
+                                return model.t("AI分割 (≤ \(mb.isEmpty ? "10" : mb)MB)", "AI Split (≤ \(mb.isEmpty ? "10" : mb)MB)")
+                            }
+                            return model.squeezerInPlace ? model.t("上書き保存", "Overwrite") : "_compressed.pdf"
+                        }()
                         topologyCard(
                             model.t("③ 保存方法", "③ Output Mode"),
-                            symbol: "arrow.triangle.2.circlepath",
-                            detail: model.squeezerInPlace ? model.t("上書き保存", "Overwrite") : "_compressed.pdf",
+                            symbol: model.squeezerSplitEnabled ? "folder.badge.plus" : "arrow.triangle.2.circlepath",
+                            detail: outputDetail,
                             state: .ready
                         )
                     }
                     .buttonStyle(.plain)
-                    .help(model.t("クリックして上書き／別名保存を切り替え", "Click to toggle overwrite or _compressed.pdf"))
+                    .help(model.t("クリックして保存方法（別名 / 上書き / AIサイズ分割）を切り替え", "Click to cycle output mode"))
 
                     Image(systemName: "chevron.right").foregroundStyle(.secondary)
 
@@ -4064,7 +4117,7 @@ struct ContentView: View {
                         model.runPDFSqueezer()
                     } label: {
                         topologyCard(
-                            model.t("④ PDFを圧縮", "④ Compress"),
+                            model.squeezerSplitEnabled ? model.t("④ 圧縮・分割", "④ Split & Compress") : model.t("④ PDFを圧縮", "④ Compress"),
                             symbol: "arrow.down.right.and.arrow.up.left.circle.fill",
                             detail: canCompress ? model.t("クリックで開始", "Click to Start") : model.t("①〜③を設定してください", "Complete ①–③"),
                             state: canCompress ? .actionReady : .disabled
@@ -4113,13 +4166,79 @@ struct ContentView: View {
                         }
 
                         Toggle(
-                            model.t("③ 元のファイルを置き換える（オフの場合は _compressed.pdf を作成）", "③ Overwrite original file(s) (creates _compressed.pdf when off)"),
-                            isOn: $model.squeezerInPlace
+                            model.t("③ AI読み込み用にサイズ上限でフォルダ分割する（元のファイルはそのまま残す）", "③ Split into a dedicated folder under size limit for AI (keeps original intact)"),
+                            isOn: $model.squeezerSplitEnabled
                         )
                         .disabled(model.isRunning)
 
+                        if model.squeezerSplitEnabled {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(spacing: 10) {
+                                    Text(model.t("1ファイル上限", "Max Size per File"))
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                    TextField("10", text: $model.squeezerMaxSizeMB)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 65)
+                                        .disabled(model.isRunning)
+                                    Text("MB")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+
+                                    ForEach(["10", "20", "30", "50"], id: \.self) { presetMB in
+                                        Button("\(presetMB)MB") {
+                                            model.squeezerMaxSizeMB = presetMB
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                        .disabled(model.isRunning)
+                                    }
+                                }
+
+                                HStack(spacing: 10) {
+                                    Text(model.t("作成先フォルダ", "Output Folder"))
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                    Text(
+                                        model.squeezerOutputDirectory?.path
+                                            ?? model.t("元ファイルと同じ場所に <PDF名>_split フォルダを作成", "Create <PDF>_split next to source PDF")
+                                    )
+                                    .font(.caption)
+                                    .foregroundStyle(model.squeezerOutputDirectory == nil ? .secondary : .primary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                    Button(model.t("フォルダ指定", "Choose Folder")) {
+                                        model.chooseSqueezerOutputDirectory()
+                                    }
+                                    .disabled(model.isRunning)
+
+                                    if model.squeezerOutputDirectory != nil {
+                                        Button(model.t("リセット", "Reset")) {
+                                            model.resetSqueezerOutputDirectory()
+                                        }
+                                        .disabled(model.isRunning)
+                                    }
+                                }
+
+                                Text(model.t("※ 指定したフォルダ内に「<PDF名>_split」フォルダを新規作成し、各ファイルが上限サイズ以下になるように圧縮・分割して保存します。", "Note: Creates a '<PDF>_split' folder in the chosen location and saves compressed parts under the size limit."))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(10)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        } else {
+                            Toggle(
+                                model.t("③ 元のファイルを置き換える（オフの場合は _compressed.pdf を作成）", "③ Overwrite original file(s) (creates _compressed.pdf when off)"),
+                                isOn: $model.squeezerInPlace
+                            )
+                            .disabled(model.isRunning)
+                        }
+
                         HStack(spacing: 10) {
-                            Button(model.t("④ PDFを圧縮", "④ Compress PDF(s)")) {
+                            Button(model.squeezerSplitEnabled ? model.t("④ PDFを圧縮して分割", "④ Compress & Split PDF(s)") : model.t("④ PDFを圧縮", "④ Compress PDF(s)")) {
                                 model.runPDFSqueezer()
                             }
                             .buttonStyle(.borderedProminent)
