@@ -3790,14 +3790,6 @@ struct ContentView: View {
                     updateAppButton
                 }
 
-                HStack(spacing: 12) {
-                    Button(Destination.urlToPDF.title(model.uiLanguage)) { destination = .urlToPDF }
-                        .buttonStyle(.borderedProminent)
-                    Button(Destination.audioLab.title(model.uiLanguage)) { destination = .audioLab }
-                    Button(Destination.pdfSqueezer.title(model.uiLanguage)) { destination = .pdfSqueezer }
-                    Spacer()
-                }
-
                 dashboardRuntimeBox
 
                 dashboardErrorHistorySection
