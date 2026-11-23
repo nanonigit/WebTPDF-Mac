@@ -2261,16 +2261,11 @@ final class AppModel: ObservableObject {
         }
         let outputURL = existingOutputURL ?? fetchedPDFRoot.appendingPathComponent("\(makeJobID())_\(hostPart).pdf")
         let useAutoName = existingOutputURL == nil
-        let checkpointURL: URL?
-        if let host = parsed.host?.lowercased(), host.hasPrefix("read.amazon.") {
-            let source = "\(resolvedDirection.rawValue)\n\(urlString)"
-            let key = SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
-            checkpointURL = applicationSupportRoot
-                .appendingPathComponent("ReaderCheckpoints", isDirectory: true)
-                .appendingPathComponent("\(key).sqlite3")
-        } else {
-            checkpointURL = nil
-        }
+        let source = "\(resolvedDirection.rawValue)\n\(urlString)"
+        let key = SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
+        let checkpointURL: URL? = applicationSupportRoot
+            .appendingPathComponent("ReaderCheckpoints", isDirectory: true)
+            .appendingPathComponent("\(key).sqlite3")
 
         let resultURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("WebTPDF-\(UUID().uuidString).json")

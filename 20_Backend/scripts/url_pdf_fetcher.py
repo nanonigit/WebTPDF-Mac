@@ -1002,6 +1002,24 @@ class ReaderCheckpoint:
             db.execute("INSERT INTO export_path VALUES (?)", (str(proposed),))
             return proposed
 
+    def save_resume_url(self, url: str) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("CREATE TABLE IF NOT EXISTS resume_state (id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL)")
+            db.execute("INSERT OR REPLACE INTO resume_state (id, url) VALUES (1, ?)", (url,))
+
+    def load_resume_url(self) -> str | None:
+        if not self.path.is_file():
+            return None
+        try:
+            with closing(sqlite3.connect(self.path)) as db:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='resume_state'").fetchone() is None:
+                    return None
+                row = db.execute("SELECT url FROM resume_state WHERE id = 1").fetchone()
+                return str(row[0]) if row and row[0] else None
+        except sqlite3.Error:
+            return None
+
     def remove(self) -> None:
         self.path.unlink(missing_ok=True)
 
@@ -2097,11 +2115,20 @@ def fetch_via_browser(
                 if resolved_output != output_path:
                     log(f"[AutoName] Output filename -> {resolved_output.name}")
             book_title = detected_title if reader_mode else None
-            saved_pages = saved_captures if reader_mode else []
+            saved_pages = saved_captures
             if saved_pages:
                 log(f"[Reader] Loaded {len(saved_pages)} saved page(s); resuming capture.")
-                if saved_pages[-1].viewport_height is not None:
+                if reader_mode and saved_pages[-1].viewport_height is not None:
                     page.set_viewport_size({"width": 800, "height": saved_pages[-1].viewport_height})
+                elif not reader_mode and reader_checkpoint is not None:
+                    resume_url = reader_checkpoint.load_resume_url()
+                    if resume_url and resume_url != page.url:
+                        log(f"[Browser] Jumping to saved resume URL: {resume_url}")
+                        page.goto(resume_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                        wait_for_page_ready(page, timeout_ms=15000)
+                        page.keyboard.press(turn_key)
+                        page.wait_for_timeout(800)
+                        wait_for_page_ready(page, timeout_ms=10000)
             elif reader_mode:
                 dismiss_reader_dialogs(page)
                 if created_page:
@@ -2165,7 +2192,7 @@ def fetch_via_browser(
             last_reader_percent: int | None = None
             last_reader_image_hash: str | None = None
             recovery_attempts = 0
-            needs_recovery = bool(saved_pages)
+            needs_recovery = bool(saved_pages) and reader_mode
             if saved_pages:
                 last_capture = saved_pages[-1]
                 prev_pdf_hash = pdf_content_signature(last_capture.pdf)
@@ -2548,6 +2575,13 @@ def fetch_via_browser(
                             expected_total_pages, last_reader_percent,
                             page.viewport_size["height"] if created_page and page.viewport_size else None,
                         ))
+                elif reader_checkpoint is not None:
+                    reader_checkpoint.append(page_idx, ReaderCapture(
+                        page_pdf_bytes, page_idx, current_pdf_hash,
+                        expected_total_pages, None, None,
+                    ))
+                    if page.url:
+                        reader_checkpoint.save_resume_url(page.url)
                 collected_page_pdfs.append(page_pdf_bytes)
                 log(f"[Browser] Captured page {page_idx} via PDF command ({len(page_pdf_bytes)} bytes)")
 
@@ -2606,6 +2640,9 @@ def fetch_via_browser(
             else:
                 written = merge_pdf_bytes_list(collected_page_pdfs, resolved_output)
             captured_steps = len(collected_page_pdfs) + skipped_blank_steps
+            is_complete_non_reader = (
+                expected_total_pages is None or captured_steps >= expected_total_pages
+            )
             try:
                 qc = verify_exported_pdf(
                     resolved_output,
@@ -2620,7 +2657,7 @@ def fetch_via_browser(
                         result_details["loadingPages"] = len(qc["loading_pages"])
             except Exception as qc_exc:
                 log(f"[Verify] Skipped ({qc_exc})")
-            if reader_mode and reader_checkpoint is not None:
+            if reader_checkpoint is not None and (reader_mode or is_complete_non_reader):
                 reader_checkpoint.remove()
             if result_details is not None and expected_total_pages is not None:
                 result_details["expectedPages"] = expected_total_pages
