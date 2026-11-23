@@ -2191,6 +2191,7 @@ def fetch_via_browser(
             expected_total_pages: int | None = None
             last_reader_percent: int | None = None
             last_reader_image_hash: str | None = None
+            oreilly_last_filename: str | None = None
             recovery_attempts = 0
             needs_recovery = bool(saved_pages) and reader_mode
             if saved_pages:
@@ -2300,27 +2301,59 @@ def fetch_via_browser(
                         m_book = re.search(r"learning\.oreilly\.com/library/view/[^/]+/(\d+)", page.url or "")
                         if m_book:
                             try:
-                                spine_total = page.evaluate(
-                                    """async (bid) => {
+                                spine_info = page.evaluate(
+                                    """async ([bid, startUrl]) => {
                                         try {
                                             const r = await fetch('/api/v2/epubs/urn:orm:book:' + encodeURIComponent(bid) + '/');
                                             if (!r.ok) return null;
                                             const d = await r.json();
                                             if (typeof d.spine === 'string') {
-                                                const sr = await fetch(d.spine);
+                                                const sep = d.spine.includes('?') ? '&' : '?';
+                                                const sr = await fetch(d.spine + sep + 'limit=1000');
                                                 if (sr.ok) {
                                                     const sd = await sr.json();
-                                                    if (typeof sd.count === 'number' && sd.count > 0) return sd.count;
+                                                    const count = typeof sd.count === 'number' ? sd.count : null;
+                                                    const results = Array.isArray(sd.results) ? sd.results : [];
+                                                    const normName = (u) => {
+                                                        if (!u) return '';
+                                                        const clean = String(u).split('#')[0].split('?')[0].replace(/\\/+$/, '');
+                                                        return clean.split('/').pop() || '';
+                                                    };
+                                                    const startName = normName(startUrl);
+                                                    let startIndex = 0;
+                                                    if (startName && results.length > 0) {
+                                                        const idx = results.findIndex((item) => {
+                                                            const candidate = item.full_path || item.url || item.href || item.reference_id || '';
+                                                            return normName(candidate) === startName;
+                                                        });
+                                                        if (idx >= 0) startIndex = idx;
+                                                    }
+                                                    let lastFilename = null;
+                                                    if (results.length > 0) {
+                                                        const lastItem = results[results.length - 1];
+                                                        lastFilename = normName(lastItem.full_path || lastItem.url || lastItem.href || '');
+                                                    }
+                                                    if (count && count > 0) {
+                                                        return {
+                                                            total: Math.max(1, count - startIndex),
+                                                            rawCount: count,
+                                                            startIndex,
+                                                            lastFilename,
+                                                        };
+                                                    }
                                                 }
                                             }
-                                            if (typeof d.page_count === 'number' && d.page_count > 0) return d.page_count;
+                                            if (typeof d.page_count === 'number' && d.page_count > 0) {
+                                                return { total: d.page_count, rawCount: d.page_count, startIndex: 0, lastFilename: null };
+                                            }
                                         } catch (e) {}
                                         return null;
                                     }""",
-                                    m_book.group(1),
+                                    [m_book.group(1), start_url],
                                 )
-                                if isinstance(spine_total, int) and spine_total > 0:
-                                    expected_total_pages = spine_total
+                                if isinstance(spine_info, dict) and isinstance(spine_info.get("total"), int) and spine_info["total"] > 0:
+                                    expected_total_pages = spine_info["total"]
+                                    oreilly_last_filename = spine_info.get("lastFilename") or None
                             except Exception:
                                 pass
                 png_bytes = page.screenshot(full_page=False, timeout=15000)
@@ -2640,6 +2673,10 @@ def fetch_via_browser(
             else:
                 written = merge_pdf_bytes_list(collected_page_pdfs, resolved_output)
             captured_steps = len(collected_page_pdfs) + skipped_blank_steps
+            if not reader_mode and "learning.oreilly.com" in (page.url or ""):
+                current_leaf = (page.url or "").split("#")[0].split("?")[0].rstrip("/").split("/")[-1]
+                if oreilly_last_filename and current_leaf == oreilly_last_filename and captured_steps > 0:
+                    expected_total_pages = captured_steps
             is_complete_non_reader = (
                 expected_total_pages is None or captured_steps >= expected_total_pages
             )
