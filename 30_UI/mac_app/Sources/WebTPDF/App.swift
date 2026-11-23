@@ -341,7 +341,7 @@ final class AppModel: ObservableObject {
     @Published var squeezerPreset: PDFCompressionPreset = .balanced
     @Published var squeezerInPlace = false
     @Published var squeezerSplitEnabled = false
-    @Published var squeezerMaxSizeMB = "10"
+    @Published var squeezerMaxSizeMB = "100"
     @Published var squeezerOutputDirectory: URL?
     @Published var audioEngineMode: AudioEngineMode = .local
     @Published var availableTTSModels: [TTSModelItem] = [
@@ -4096,7 +4096,7 @@ struct ContentView: View {
                         let outputDetail: String = {
                             if model.squeezerSplitEnabled {
                                 let mb = model.squeezerMaxSizeMB.trimmingCharacters(in: .whitespacesAndNewlines)
-                                return model.t("AI分割 (≤ \(mb.isEmpty ? "10" : mb)MB)", "AI Split (≤ \(mb.isEmpty ? "10" : mb)MB)")
+                                return model.t("AI分割 (≤ \(mb.isEmpty ? "100" : mb)MB)", "AI Split (≤ \(mb.isEmpty ? "100" : mb)MB)")
                             }
                             return model.squeezerInPlace ? model.t("上書き保存", "Overwrite") : "_compressed.pdf"
                         }()
@@ -4177,7 +4177,7 @@ struct ContentView: View {
                                     Text(model.t("1ファイル上限", "Max Size per File"))
                                         .font(.callout)
                                         .foregroundStyle(.secondary)
-                                    TextField("10", text: $model.squeezerMaxSizeMB)
+                                    TextField("100", text: $model.squeezerMaxSizeMB)
                                         .textFieldStyle(.roundedBorder)
                                         .frame(width: 65)
                                         .disabled(model.isRunning)
@@ -4185,7 +4185,7 @@ struct ContentView: View {
                                         .font(.callout)
                                         .foregroundStyle(.secondary)
 
-                                    ForEach(["10", "20", "30", "50"], id: \.self) { presetMB in
+                                    ForEach(["10", "30", "50", "100"], id: \.self) { presetMB in
                                         Button("\(presetMB)MB") {
                                             model.squeezerMaxSizeMB = presetMB
                                         }
