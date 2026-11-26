@@ -1530,11 +1530,11 @@ READER_CHROME_HIDE_SCRIPT = """() => {
     const selectors = [
         'header', 'footer', 'nav', 'ion-header', 'ion-footer', 'ion-toolbar',
         '#reader-header', '#reader-footer',
-        '#kr-chevron-left', '#kr-chevron-right',
+        '#kr-chevron-left', '#kr-chevron-right', '[class*="chevron" i]',
         '[class*="kr-header" i]', '[class*="kr-footer" i]',
         '[class*="scrubber" i]', '[role="slider"]', 'ion-range',
         '[class*="bookmark" i]', '[aria-label*="bookmark" i]', '[aria-label*="ブックマーク" i]',
-        '[aria-label="Reader menu"]', '[aria-label="メニュー"]'
+        '[aria-label*="Back to" i]', '[aria-label="Reader menu"]', '[aria-label="メニュー"]'
     ];
     for (const sel of selectors) {
         document.querySelectorAll(sel).forEach(el => {
@@ -1545,6 +1545,7 @@ READER_CHROME_HIDE_SCRIPT = """() => {
         });
     }
     const vh = window.innerHeight || 0;
+    const vw = window.innerWidth || 0;
     document.querySelectorAll('*').forEach(el => {
         if (el.hasAttribute('data-ec-reader-hide')) return;
         const tag = el.tagName;
@@ -1556,7 +1557,8 @@ READER_CHROME_HIDE_SCRIPT = """() => {
         if (r.width <= 0 || r.height <= 0) return;
         const isTopBar = r.top <= 30 && r.height <= 160 && r.width >= 200;
         const isBottomBar = vh > 0 && r.bottom >= vh - 30 && r.top >= vh - 200 && r.height <= 200 && r.width >= 200;
-        if (isTopBar || isBottomBar) {
+        const isBottomWidget = vh > 0 && r.bottom >= vh - 160 && r.top >= vh - 200 && r.height <= 120 && r.width <= 200 && (r.left <= 120 || (vw > 0 && r.right >= vw - 120));
+        if (isTopBar || isBottomBar || isBottomWidget) {
             el.setAttribute('data-ec-reader-hide', el.style.display || '');
             el.style.setProperty('display', 'none', 'important');
         }
@@ -1734,6 +1736,9 @@ def capture_page_as_pdf_bytes(page, cdp_session=None) -> bytes:
         }
     )
 
+    reader_mode = is_paginated_reader(page)
+    if reader_mode:
+        _hide_reader_chrome(page)
     try:
         if cdp_session is not None:
             try:
@@ -1758,19 +1763,14 @@ def capture_page_as_pdf_bytes(page, cdp_session=None) -> bytes:
             )
             return strip_trailing_blank_pages(data) if fixed_layout else data
         except Exception:
-            reader_mode = is_paginated_reader(page)
-            if reader_mode:
-                _hide_reader_chrome(page)
-            try:
-                png_bytes = page.screenshot(full_page=False)
-            finally:
-                if reader_mode:
-                    _restore_reader_chrome(page)
+            png_bytes = page.screenshot(full_page=False)
             buf = io.BytesIO()
             with Image.open(io.BytesIO(png_bytes)) as img:
                 img.convert("RGB").save(buf, "PDF")
             return buf.getvalue()
     finally:
+        if reader_mode:
+            _restore_reader_chrome(page)
         remove_print_cleanup(page)
 
 
