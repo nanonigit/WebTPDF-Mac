@@ -842,8 +842,12 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
                 log("[Reader] Jumped near start via Table of Contents.")
         except Exception:
             pass
-    if jumped_by_nav and not is_reader_not_at_start(page):
-        return
+    if jumped_by_nav:
+        pos_after = get_reader_position(page)
+        if pos_after is not None and pos_after[1] <= 1:
+            return
+        if pos_after is not None and not is_reader_not_at_start(page):
+            return
     reverse_key = "ArrowRight" if turn_key == "ArrowLeft" else "ArrowLeft"
     log(f"[Reader] Not at first page; rewinding to start via {reverse_key}...")
     unchanged = 0
@@ -2748,7 +2752,8 @@ def fetch_via_browser(
                         dismiss_reader_dialogs(page)
                         if is_reader_oops(page):
                             continue
-                        if is_reader_not_at_start(page):
+                        initial_pos = get_reader_position(page)
+                        if is_reader_not_at_start(page) or initial_pos is None or initial_pos[1] > 1:
                             rewind_reader_to_start(page, turn_key)
                             dismiss_reader_dialogs(page)
                         if is_reader_oops(page):
