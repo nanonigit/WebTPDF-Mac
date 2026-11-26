@@ -4582,17 +4582,41 @@ struct ContentView: View {
                     Spacer()
 
                     if isActiveJobRunning {
-                        Button(model.t("停止", "Stop"), role: .destructive) {
+                        if model.isRunningQueue {
+                            if model.isQueueAutoPaused {
+                                Button(model.t("完了後停止を解除", "Cancel Pause")) {
+                                    model.isQueueAutoPaused = false
+                                }
+                                .buttonStyle(.bordered)
+                                .help(model.t("今の本が終わったら自動停止する予約を取り消します", "Keep running after the current book finishes"))
+                            } else {
+                                Button(model.t("この本が終わったら停止", "Stop After This Book")) {
+                                    model.pauseQueueAutoRun()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.orange)
+                                .help(model.t("現在処理中の本を最後まで保存してから、次のキューを止めます", "Finish the current book, then pause the queue"))
+                            }
+                        }
+                        Button(model.t("今すぐ停止", "Stop Now"), role: .destructive) {
                             model.cancelJob()
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.red)
                     } else if pendingCount > 0 && !model.isUpdatingApp {
-                        Button(model.t("キューを実行", "Run Queue")) {
-                            model.startQueue()
+                        if model.isQueueAutoPaused {
+                            Button(model.t("再開（キューを実行）", "Resume Queue")) {
+                                model.resumeQueueAutoRun()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                        } else {
+                            Button(model.t("キューを実行", "Run Queue")) {
+                                model.startQueue()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.blue)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.blue)
                     }
                 }
 
