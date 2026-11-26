@@ -2038,6 +2038,12 @@ READER_VIEWPORT_WIDTH = 1020
 READER_LANDSCAPE_VIEWPORT_WIDTH = 1360
 READER_DEFAULT_HEIGHT = 1360
 
+READER_ASPECT_PRESETS: dict[str, tuple[int, int]] = {
+    "ipad": (1020, 1360),
+    "iphone": (760, 1350),
+    "pc": (1360, 1020),
+}
+
 READER_CHROME_HIDE_SCRIPT = """() => {
     const selectors = [
         'header', 'footer', 'nav', 'ion-header', 'ion-footer', 'ion-toolbar',
@@ -2731,6 +2737,7 @@ def fetch_via_browser(
     auto_name: bool = False,
     reader_checkpoint: ReaderCheckpoint | None = None,
     result_details: dict[str, int] | None = None,
+    aspect_preset: str = "ipad",
 ) -> tuple[int, Path]:
     """Use CDP (logged-in Chrome) or headless Chromium to paginate with ArrowRight/ArrowLeft and capture PDFs."""
     turn_key = "ArrowLeft" if direction == "left" else "ArrowRight"
@@ -2842,7 +2849,8 @@ def fetch_via_browser(
                 dismiss_reader_dialogs(page)
                 if created_page:
                     try:
-                        page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": READER_DEFAULT_HEIGHT})
+                        init_w, init_h = READER_ASPECT_PRESETS.get(aspect_preset, (READER_VIEWPORT_WIDTH, READER_DEFAULT_HEIGHT))
+                        page.set_viewport_size({"width": init_w, "height": init_h})
                         page.wait_for_timeout(800)
                     except Exception:
                         pass
@@ -3185,12 +3193,15 @@ def fetch_via_browser(
                             cover_ratio = measure_cover_aspect_ratio(reader_png)
                             if cover_ratio is not None:
                                 if cover_ratio < 1.15:
+                                    # Keep natural landscape / spread aspect ratio for fixed-shape books (scores, spreads)
                                     target_w = READER_LANDSCAPE_VIEWPORT_WIDTH
                                     target_h = max(950, min(1360, int(target_w * cover_ratio + 80)))
+                                elif aspect_preset in READER_ASPECT_PRESETS:
+                                    target_w, target_h = READER_ASPECT_PRESETS[aspect_preset]
                                 else:
-                                    # iPad 3:4 portrait friendly aspect ratio (~1:1.33 to 1:1.38)
+                                    # auto: match cover aspect ratio
                                     target_w = READER_VIEWPORT_WIDTH
-                                    target_h = max(1200, min(1400, int(target_w * min(cover_ratio, 1.38) + 40)))
+                                    target_h = max(1100, min(1600, int(target_w * cover_ratio + 60)))
                                 try:
                                     page.set_viewport_size({"width": target_w, "height": target_h})
                                     page.wait_for_timeout(800)
@@ -3534,6 +3545,7 @@ def main() -> int:
     parser.add_argument("--max-pages", type=int, default=1000, help="Maximum pages to paginate (default: 1000)")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds (default: 30)")
     parser.add_argument("--direction", choices=["right", "left"], default="right", help="Page-turn key direction (default: right)")
+    parser.add_argument("--aspect-preset", choices=["ipad", "iphone", "pc", "auto"], default="ipad", help="Preferred viewport aspect ratio for reflowable books (default: ipad)")
     parser.add_argument("--no-browser", action="store_true", help="Disable Playwright browser fallback")
     parser.add_argument("--auto-name", action="store_true", help="Auto-name output as <Title>_<YYYYMMDD>.pdf when available")
     parser.add_argument("--reader-checkpoint", type=Path, help="Save and resume captured Reader pages")
@@ -3569,6 +3581,7 @@ def main() -> int:
                 max_pages=max(1, args.max_pages), timeout=max(5, args.timeout),
                 direction=args.direction, auto_name=args.auto_name, reader_checkpoint=checkpoint,
                 result_details=result_details,
+                aspect_preset=args.aspect_preset,
             )
         elif args.auto_name and not args.no_browser:
             # Allow fetch_and_merge / fetch_via_browser to resolve final output path
@@ -3597,6 +3610,7 @@ def main() -> int:
                         direction=args.direction,
                         auto_name=True,
                         result_details=result_details,
+                        aspect_preset=args.aspect_preset,
                     )
         else:
             total_pages = fetch_and_merge(

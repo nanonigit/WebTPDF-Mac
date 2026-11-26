@@ -605,7 +605,36 @@ final class AppModel: ObservableObject {
     @Published private(set) var ollamaStatusMessage = "未確認"
     @Published private(set) var isTestingOllama = false
     @Published private(set) var ollamaTestOutput = ""
+    enum ReaderAspectPreset: String, CaseIterable, Identifiable {
+        case ipad = "ipad"
+        case iphone = "iphone"
+        case pc = "pc"
+        case auto = "auto"
+
+        var id: String { rawValue }
+
+        func label(_ lang: UILanguage) -> String {
+            switch self {
+            case .ipad: return lang == .ja ? "iPad用 (3:4)" : "iPad (3:4)"
+            case .iphone: return lang == .ja ? "iPhone用" : "iPhone"
+            case .pc: return lang == .ja ? "PC用 (4:3)" : "PC (4:3)"
+            case .auto: return lang == .ja ? "自動" : "Auto"
+            }
+        }
+    }
+
     @Published var maxPagesSetting = "1000"
+    @Published var readerAspectPreset: ReaderAspectPreset = {
+        if let raw = UserDefaults.standard.string(forKey: "readerAspectPresetRaw"),
+           let preset = ReaderAspectPreset(rawValue: raw) {
+            return preset
+        }
+        return .ipad
+    }() {
+        didSet {
+            UserDefaults.standard.set(readerAspectPreset.rawValue, forKey: "readerAspectPresetRaw")
+        }
+    }
     @Published var customPDFSaveDirectory: URL? = {
         if let saved = UserDefaults.standard.string(forKey: "pdfSaveDirectory"), !saved.isEmpty {
             return URL(fileURLWithPath: saved, isDirectory: true)
@@ -2807,6 +2836,7 @@ final class AppModel: ObservableObject {
                 "--url", urlString,
                 "--output", outputURL.path,
                 "--direction", resolvedDirection.rawValue,
+                "--aspect-preset", readerAspectPreset.rawValue,
                 "--max-pages", String(max(1, maxPages)),
                 "--result-json", resultURL.path,
             ]
@@ -3643,6 +3673,24 @@ struct ContentView: View {
                             TextField("1000", text: $model.maxPagesSetting)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 85)
+                        }
+
+                        HStack(spacing: 10) {
+                            Text(model.t("ページ比率", "Page Aspect"))
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            Picker(model.t("ページ比率", "Page Aspect"), selection: $model.readerAspectPreset) {
+                                ForEach(AppModel.ReaderAspectPreset.allCases) { preset in
+                                    Text(preset.label(model.uiLanguage)).tag(preset)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(maxWidth: 340)
+                            Text(model.t("※文字サイズ変更できる本のみ適用／漫画・楽譜など固定形は元の比率を維持", "* Applies to reflowable books only; fixed-layout books keep original shape"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer()
                         }
 
                         HStack(spacing: 10) {
