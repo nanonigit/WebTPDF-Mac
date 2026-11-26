@@ -1133,28 +1133,19 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
                     page.keyboard.press("Escape")
                 except Exception:
                     pass
-    if jumped_by_nav:
-        pos_after = get_reader_position(page)
-        pct_after = get_reader_progress_percent(page)
-        if (pos_after is not None and pos_after[1] <= 1) or (pct_after is not None and pct_after == 0):
-            return
-        if pos_after is not None and not is_reader_not_at_start(page):
-            return
-    # Ensure no toolbar menu/overlay is capturing arrow keys before stepping backwards.
+    # Even after TOC/Location 1 jump, always press Escape and step backward until we truly hit the cover
+    # (TOC often lands on page 2-4 like "Characters" or "Intro", which can still show 0% or Location 2).
     try:
         page.keyboard.press("Escape")
         page.wait_for_timeout(200)
     except Exception:
         pass
     reverse_key = "ArrowRight" if turn_key == "ArrowLeft" else "ArrowLeft"
-    log(f"[Reader] Not at first page; rewinding to start via {reverse_key}...")
+    log(f"[Reader] Stepping back to true cover (page 1) via {reverse_key}...")
     unchanged = 0
     for step in range(max_steps):
         dismiss_reader_dialogs(page)
         prev_pos = get_reader_position(page)
-        if prev_pos is not None and prev_pos[1] <= 1:
-            log(f"[Reader] Reached first page ({prev_pos[0]} {prev_pos[1]}) after {step} backward step(s).")
-            return
         prev_src = page.evaluate(READER_PAGE_SOURCE)
         prev_frame_hash = None
         if not prev_src:
@@ -1175,14 +1166,11 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
                 changed = True
         if changed:
             unchanged = 0
-            if cur_pos is not None and cur_pos[1] <= 1:
-                log(f"[Reader] Reached first page ({cur_pos[0]} {cur_pos[1]}) after {step + 1} backward step(s).")
-                return
         else:
             unchanged += 1
-            page.wait_for_timeout(300)
-            if unchanged >= 3:
-                log(f"[Reader] Reached first page after {step + 1} backward step(s).")
+            page.wait_for_timeout(250)
+            if unchanged >= 2:
+                log(f"[Reader] Reached true cover ({cur_pos}) after {step + 1} backward step(s).")
                 return
     log(f"[Reader] Rewind stopped after {max_steps} steps.")
 
@@ -3156,16 +3144,16 @@ def fetch_via_browser(
                                 break
                             after_pos = get_reader_position(page)
                             after_pct = get_reader_progress_percent(page)
-                            if (after_pos is None or after_pos[1] <= 3) and (after_pct is None or after_pct < 15):
+                            if (after_pos is None or after_pos[1] <= 1) and (after_pct is None or after_pct <= 1):
                                 break
-                            log(f"[Reader] Still not at first page after rewind {rewind_try + 1}/2 (pos={after_pos}, pct={after_pct}).")
+                            log(f"[Reader] Still not at cover after rewind {rewind_try + 1}/2 (pos={after_pos}, pct={after_pct}).")
                         if is_reader_oops(page):
                             continue
                         verify_pos = get_reader_position(page)
                         verify_pct = get_reader_progress_percent(page)
-                        if (verify_pos is not None and verify_pos[1] > 5) or (verify_pct is not None and verify_pct >= 20):
+                        if (verify_pos is not None and verify_pos[1] > 2) or (verify_pct is not None and verify_pct >= 5):
                             raise RuntimeError(
-                                f"最初のページ（1ページ目）に戻れませんでした（現在位置: {verify_pos[1] if verify_pos else '?'} / {verify_pct if verify_pct is not None else '?'}%）。再ダウンロードしてください。"
+                                f"表紙（1ページ目）まで戻れませんでした（現在位置: {verify_pos[1] if verify_pos else '?'} / {verify_pct if verify_pct is not None else '?'}%）。再ダウンロードしてください。"
                             )
                         detected_key = detect_reader_turn_direction(page, turn_key)
                         if detected_key != turn_key:
