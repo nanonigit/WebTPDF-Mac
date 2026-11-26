@@ -838,6 +838,8 @@ def dismiss_reader_dialogs(page) -> bool:
             page.get_by_role("button", name=no_pattern).filter(visible=True).first,
             page.locator("button:has-text('No'), button:has-text('いいえ'), ion-button:has-text('No'), ion-button:has-text('いいえ'), [role='button']:has-text('No'), [role='button']:has-text('いいえ')").filter(visible=True).first,
         ]
+        if is_recent_prompt:
+            candidates.append(page.get_by_text(no_pattern, exact=True).filter(visible=True).first)
         for no_btn in candidates:
             try:
                 if no_btn.count() > 0 and no_btn.is_visible():
@@ -923,6 +925,114 @@ def jump_to_reader_toc_start(page) -> bool:
                 clicked_button.click(timeout=2000)
         except Exception:
             pass
+
+
+def _detect_chevron_turn_key(page) -> str | None:
+    """Inspect Kindle Cloud Reader chevron buttons to determine which key advances to the next page."""
+    try:
+        detected = page.evaluate("""() => {
+            const left = document.querySelector('#kr-chevron-left, [data-testid="chevron-left"]');
+            const right = document.querySelector('#kr-chevron-right, [data-testid="chevron-right"]');
+            const label = (el) => {
+                if (!el) return '';
+                return [
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('title') || '',
+                    el.textContent || '',
+                ].join(' ').toLowerCase();
+            };
+            const lText = label(left);
+            const rText = label(right);
+            const isNext = (s) => s.includes('next') || s.includes('次');
+            const isPrev = (s) => s.includes('prev') || s.includes('前');
+            if (isNext(lText) && !isNext(rText)) return 'ArrowLeft';
+            if (isNext(rText) && !isNext(lText)) return 'ArrowRight';
+            if (isPrev(rText) && !isPrev(lText)) return 'ArrowLeft';
+            if (isPrev(lText) && !isPrev(rText)) return 'ArrowRight';
+            return null;
+        }""")
+        if detected in ("ArrowLeft", "ArrowRight"):
+            return detected
+    except Exception:
+        pass
+    return None
+
+
+def detect_reader_turn_direction(page, current_turn_key: str) -> str:
+    """Auto-detect whether ArrowLeft or ArrowRight advances pages; return corrected key."""
+    dismiss_reader_dialogs(page)
+    reverse_key = "ArrowRight" if current_turn_key == "ArrowLeft" else "ArrowLeft"
+
+    # 1. Check DOM chevron aria-label / title first (instant and zero page movement).
+    chevron_key = _detect_chevron_turn_key(page)
+    if chevron_key in ("ArrowLeft", "ArrowRight"):
+        if chevron_key != current_turn_key:
+            log(f"[Reader] Auto-detected turn direction from reader controls: {current_turn_key} -> {chevron_key}")
+        return chevron_key
+
+    # 2. Live 1-step probe: press current_turn_key once and check whether position/view advances.
+    try:
+        pos0 = get_reader_position(page)
+        pct0 = get_reader_progress_percent(page)
+        src0 = page.evaluate(READER_PAGE_SOURCE)
+        hash0 = None
+        if not src0:
+            f0 = _capture_clean_reader_frame(page, timeout_ms=5000)
+            if f0 is not None:
+                hash0 = hashlib.sha256(f0).hexdigest()
+
+        page.keyboard.press(current_turn_key)
+        moved = wait_for_reader_turn(page, src0, timeout_ms=1500) if src0 else False
+        if not src0:
+            page.wait_for_timeout(450)
+        pos1 = get_reader_position(page)
+        pct1 = get_reader_progress_percent(page)
+        if not moved and hash0 is not None:
+            f1 = _capture_clean_reader_frame(page, timeout_ms=5000)
+            if f1 is not None and hashlib.sha256(f1).hexdigest() != hash0:
+                moved = True
+        if pos0 is not None and pos1 is not None and pos1 != pos0:
+            moved = True
+
+        if moved:
+            # Step back to the starting page before returning.
+            if pos0 is not None and pos1 is not None and pos1[1] < pos0[1]:
+                page.keyboard.press(reverse_key)
+                page.wait_for_timeout(400)
+                log(f"[Reader] Auto-corrected turn direction (position decreased): {current_turn_key} -> {reverse_key}")
+                return reverse_key
+            if pct0 is not None and pct1 is not None and pct1 < pct0:
+                page.keyboard.press(reverse_key)
+                page.wait_for_timeout(400)
+                log(f"[Reader] Auto-corrected turn direction (progress decreased): {current_turn_key} -> {reverse_key}")
+                return reverse_key
+            # Current key advanced forward — step back once so capture starts at page 1.
+            page.keyboard.press(reverse_key)
+            page.wait_for_timeout(400)
+            return current_turn_key
+
+        # Pressing current_turn_key did nothing (likely at page 1 with wrong direction); probe reverse_key.
+        page.keyboard.press(reverse_key)
+        rev_moved = wait_for_reader_turn(page, src0, timeout_ms=1500) if src0 else False
+        if not src0:
+            page.wait_for_timeout(450)
+        pos2 = get_reader_position(page)
+        if not rev_moved and hash0 is not None:
+            f2 = _capture_clean_reader_frame(page, timeout_ms=5000)
+            if f2 is not None and hashlib.sha256(f2).hexdigest() != hash0:
+                rev_moved = True
+        if pos0 is not None and pos2 is not None and pos2[1] > pos0[1]:
+            rev_moved = True
+
+        if rev_moved:
+            # Step back once to return to page 1.
+            page.keyboard.press(current_turn_key)
+            page.wait_for_timeout(400)
+            log(f"[Reader] Auto-corrected turn direction (start-page probe): {current_turn_key} -> {reverse_key}")
+            return reverse_key
+    except Exception:
+        pass
+    return current_turn_key
 
 
 def _reveal_reader_toolbar(page) -> None:
@@ -2905,6 +3015,13 @@ def fetch_via_browser(
                             raise RuntimeError(
                                 f"最初のページ（1ページ目）に戻れませんでした（現在位置: {verify_pos[1] if verify_pos else '?'} / {verify_pct if verify_pct is not None else '?'}%）。再ダウンロードしてください。"
                             )
+                        detected_key = detect_reader_turn_direction(page, turn_key)
+                        if detected_key != turn_key:
+                            turn_key = detected_key
+                            detected_dir = "left" if turn_key == "ArrowLeft" else "right"
+                            log(f"DETECTED_DIRECTION={detected_dir}")
+                            if result_details is not None:
+                                result_details["detectedDirection"] = detected_dir
                 else:
                     wait_for_page_ready(page, timeout_ms=15000)
                     for _ in range(3):

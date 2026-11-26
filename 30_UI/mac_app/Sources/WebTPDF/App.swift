@@ -346,6 +346,7 @@ final class AppModel: ObservableObject {
         let verifiedPages: Int?
         let loadingPages: Int?
         let bookTitle: String?
+        let detectedDirection: String?
         let message: String?
     }
 
@@ -1611,7 +1612,12 @@ final class AppModel: ObservableObject {
                     self.fetchedPDFURL = mergedURL
                     self.fetchedFromSourceURL = item.url
                     self.outputDirectory = mergedURL.deletingLastPathComponent()
-                    self.recordURLFetchHistory(url: item.url, direction: item.direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages, bookTitle: result.bookTitle ?? item.bookTitle)
+                    let finalDirection: PageTurnDirection = {
+                        if result.detectedDirection == "left" { return .left }
+                        if result.detectedDirection == "right" { return .right }
+                        return item.direction
+                    }()
+                    self.recordURLFetchHistory(url: item.url, direction: finalDirection, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages, bookTitle: result.bookTitle ?? item.bookTitle)
                     self.pdfQueue.remove(at: index)
                     let totalPages = max(1, (self.pdfQueue.count + 4) / 5)
                     if self.queuePageIndex >= totalPages {
