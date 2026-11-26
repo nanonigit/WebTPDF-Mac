@@ -2305,6 +2305,8 @@ def fetch_via_browser(
             reader_error_at_open = reader_mode and is_reader_oops(page)
             if (auto_name or reader_mode) and not reader_error_at_open:
                 detected_title, detected_pub = extract_book_title_and_date(page)
+                if detected_title and result_details is not None:
+                    result_details["bookTitle"] = detected_title
             if auto_name:
                 resolved_output = resolve_auto_output_path(output_path, detected_title, detected_pub)
                 if resolved_output != output_path:

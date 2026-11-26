@@ -250,6 +250,7 @@ final class AppModel: ObservableObject {
         var status: Status = .pending
         var outputURL: URL?
         var errorMessage: String?
+        var bookTitle: String?
     }
 
     struct URLFetchHistoryItem: Identifiable, Codable, Hashable {
@@ -266,6 +267,17 @@ final class AppModel: ObservableObject {
         let unverifiedGaps: Int?
         let verifiedPages: Int?
         var loadingPages: Int?
+        var bookTitle: String? = nil
+
+        var displayTitle: String {
+            if let bookTitle, !bookTitle.isEmpty {
+                return bookTitle
+            }
+            if let outputPath, !outputPath.isEmpty {
+                return URL(fileURLWithPath: outputPath).lastPathComponent
+            }
+            return url
+        }
 
         var isReaderSite: Bool {
             URL(string: url)?.host?.lowercased().hasPrefix("read.amazon.") == true
@@ -304,6 +316,7 @@ final class AppModel: ObservableObject {
         let unverifiedGaps: Int?
         let verifiedPages: Int?
         let loadingPages: Int?
+        let bookTitle: String?
         let message: String?
     }
 
@@ -1028,13 +1041,20 @@ final class AppModel: ObservableObject {
     }
 
     func queueDisplayTitle(for item: PDFQueueItem) -> String? {
+        if let title = item.bookTitle, !title.isEmpty {
+            return title
+        }
         if let out = item.outputURL {
             return out.deletingPathExtension().lastPathComponent
         }
         let key = normalizedDuplicateKey(item.url)
-        if let hist = urlFetchHistory.first(where: { normalizedDuplicateKey($0.url) == key }),
-           let path = hist.outputPath, !path.isEmpty {
-            return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+        if let hist = urlFetchHistory.first(where: { normalizedDuplicateKey($0.url) == key }) {
+            if let title = hist.bookTitle, !title.isEmpty {
+                return title
+            }
+            if let path = hist.outputPath, !path.isEmpty {
+                return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+            }
         }
         return nil
     }
@@ -1121,8 +1141,15 @@ final class AppModel: ObservableObject {
         lastPrintedPage: Int? = nil,
         unverifiedGaps: Int? = nil,
         verifiedPages: Int? = nil,
-        loadingPages: Int? = nil
+        loadingPages: Int? = nil,
+        bookTitle: String? = nil
     ) {
+        let key = normalizedDuplicateKey(url)
+        let existingTitle = urlFetchHistory.first(where: { normalizedDuplicateKey($0.url) == key })?.bookTitle
+        let resolvedTitle = bookTitle
+            ?? activeFetchBookTitle
+            ?? outputURL?.deletingPathExtension().lastPathComponent
+            ?? existingTitle
         let entry = URLFetchHistoryItem(
             id: UUID(),
             url: url,
@@ -1136,7 +1163,8 @@ final class AppModel: ObservableObject {
             lastPrintedPage: lastPrintedPage,
             unverifiedGaps: unverifiedGaps,
             verifiedPages: verifiedPages,
-            loadingPages: loadingPages
+            loadingPages: loadingPages,
+            bookTitle: resolvedTitle
         )
         urlFetchHistory.removeAll { $0.url == url && $0.direction == direction }
         urlFetchHistory.insert(entry, at: 0)
@@ -1152,7 +1180,8 @@ final class AppModel: ObservableObject {
         recordURLFetchHistory(
             url: url, direction: direction, outputURL: nil, succeeded: false,
             errorMessage: error.localizedDescription, pageCount: result?.pageCount, expectedPages: result?.expectedPages,
-            lastPrintedPage: result?.lastPrintedPage, loadingPages: result?.loadingPages
+            lastPrintedPage: result?.lastPrintedPage, loadingPages: result?.loadingPages,
+            bookTitle: result?.bookTitle ?? activeFetchBookTitle
         )
     }
 
@@ -2690,7 +2719,17 @@ final class AppModel: ObservableObject {
                 if let range = lineStr.range(of: "[AutoName] Output filename -> ") {
                     let filename = String(lineStr[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
                     if !filename.isEmpty {
-                        activeFetchBookTitle = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+                        let parsedTitle = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+                        activeFetchBookTitle = parsedTitle
+                        let key = normalizedDuplicateKey(url)
+                        for idx in pdfQueue.indices where normalizedDuplicateKey(pdfQueue[idx].url) == key {
+                            pdfQueue[idx].bookTitle = parsedTitle
+                        }
+                        if let hIdx = urlFetchHistory.firstIndex(where: { normalizedDuplicateKey($0.url) == key }),
+                           (urlFetchHistory[hIdx].bookTitle ?? "").isEmpty {
+                            urlFetchHistory[hIdx].bookTitle = parsedTitle
+                            saveURLFetchHistory()
+                        }
                     }
                 } else if lineStr.hasPrefix("[Browser] Captured page "),
                           let num = Int(lineStr.dropFirst("[Browser] Captured page ".count).split(separator: " ").first ?? "") {
@@ -3712,10 +3751,17 @@ struct ContentView: View {
                             }
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.url)
-                                    .font(.caption)
+                                Text(entry.displayTitle)
+                                    .font(.caption.weight(.medium))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                if entry.displayTitle != entry.url {
+                                    Text(entry.url)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
                                 HStack(spacing: 8) {
                                     Text(entry.direction.label(model.uiLanguage))
                                     if let count = entry.pageCount {
@@ -4329,7 +4375,7 @@ struct ContentView: View {
                             }
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.outputPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? entry.url)
+                                Text(entry.displayTitle)
                                     .font(.caption.weight(.medium))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
