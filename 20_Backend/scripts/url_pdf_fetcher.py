@@ -932,9 +932,11 @@ def is_reader_not_at_start(page) -> bool:
     return False
 
 
-def jump_to_reader_toc_start(page) -> bool:
-    """Open the reader's TOC and jump to Cover / 表紙 or the very first TOC entry."""
-    previous_source = page.evaluate(READER_PAGE_SOURCE)
+def jump_to_reader_toc_start(page) -> tuple[bool, bool]:
+    """Open the reader's TOC and jump to Cover / 表紙 or the very first TOC entry.
+
+    Returns (jumped, clicked_explicit_cover).
+    """
     toggle = page.get_by_role("button", name=READER_TOC_NAME).or_(
         page.locator("#kr-toc-button, #reader-toc-button, [data-testid='toc-button']")
     )
@@ -945,19 +947,41 @@ def jump_to_reader_toc_start(page) -> bool:
             clicked_button = button
             break
     if clicked_button is None:
-        return False
+        return False, False
 
     heading = page.get_by_role("heading", name=READER_TOC_NAME).filter(visible=True).first
     if not heading.count():
         heading = page.get_by_text(READER_TOC_NAME, exact=True).filter(visible=True).last
     try:
-        heading.wait_for(state="visible", timeout=2000)
+        heading.wait_for(state="visible", timeout=2500)
+        # First, directly match an explicit Cover / 表紙 entry in the open TOC sidebar.
+        cover_pattern = re.compile(r"^(?:表紙|Cover|Beginning|先頭)$", re.I)
+        cover_loc = page.get_by_text(cover_pattern).filter(visible=True).first
+        if cover_loc.count() > 0:
+            cover_loc.click(timeout=2500)
+            page.wait_for_timeout(600)
+            if heading.is_visible():
+                try:
+                    clicked_button.click(timeout=2000)
+                    page.wait_for_timeout(300)
+                except Exception:
+                    pass
+            if heading.is_visible():
+                try:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(300)
+                except Exception:
+                    pass
+            _wait_for_reader_reader(page, timeout_ms=8000)
+            page.wait_for_timeout(500)
+            return True, True
+
         panel = heading.locator("xpath=..")
         entry_selector = "button, a, [role=option], [role=menuitem], [role=button], li[tabindex]"
         for _ in range(4):
             if panel.evaluate("node => node === document.body || node === document.documentElement"):
                 break
-            target_index = panel.evaluate("""(panel, {selector}) => {
+            info = panel.evaluate("""(panel, {selector}) => {
                 const entries = [...panel.querySelectorAll(selector)];
                 const chapters = entries.filter(node =>
                     node.getClientRects().length && node.textContent.trim() &&
@@ -966,17 +990,32 @@ def jump_to_reader_toc_start(page) -> bool:
                 );
                 if (!chapters.length) return null;
                 const cover = chapters.find(node => /^(?:cover|表紙|beginning|先頭)$/i.test(node.textContent.trim()));
-                return entries.indexOf(cover || chapters[0]);
+                const chosen = cover || chapters[0];
+                return { index: entries.indexOf(chosen), isCover: Boolean(cover) };
             }""", {"selector": entry_selector})
-            if target_index is not None and target_index >= 0:
-                panel.locator(entry_selector).nth(target_index).click(timeout=3000)
-                heading.wait_for(state="hidden", timeout=2500)
-                wait_for_reader_turn(page, previous_source, timeout_ms=2500)
-                return True
+            if info is not None and info.get("index", -1) >= 0:
+                panel.locator(entry_selector).nth(info["index"]).click(timeout=3000)
+                page.wait_for_timeout(600)
+                # On wide viewports the TOC sidebar stays open after clicking an item; close it explicitly.
+                if heading.is_visible():
+                    try:
+                        clicked_button.click(timeout=2000)
+                        page.wait_for_timeout(300)
+                    except Exception:
+                        pass
+                if heading.is_visible():
+                    try:
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(300)
+                    except Exception:
+                        pass
+                _wait_for_reader_reader(page, timeout_ms=8000)
+                page.wait_for_timeout(500)
+                return True, bool(info.get("isCover"))
             panel = panel.locator("xpath=..")
-        return False
+        return False, False
     except Exception:
-        return False
+        return False, False
     finally:
         try:
             if heading.is_visible() and clicked_button.is_visible():
@@ -1126,19 +1165,33 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
     """Jump to TOC Cover or Location/Page 1 when available, then step back any remaining pages to cover."""
     _reveal_reader_toolbar(page)
     jumped_by_nav = False
+    clicked_explicit_cover = False
     try:
-        toc_ok = jump_to_reader_toc_start(page)
+        toc_ok, clicked_explicit_cover = jump_to_reader_toc_start(page)
         page.wait_for_timeout(500)
         pos_after_toc = get_reader_position(page)
         pct_after_toc = get_reader_progress_percent(page)
         if toc_ok or (pos_after_toc is not None and pos_after_toc[1] <= 3) or (pct_after_toc is not None and pct_after_toc == 0):
             jumped_by_nav = True
-            log(f"[Reader] Jumped near start via Table of Contents (pos={pos_after_toc}, pct={pct_after_toc}).")
+            log(f"[Reader] Jumped near start via Table of Contents (cover={clicked_explicit_cover}, pos={pos_after_toc}, pct={pct_after_toc}).")
     except Exception:
         try:
             page.keyboard.press("Escape")
         except Exception:
             pass
+    if clicked_explicit_cover:
+        # We explicitly clicked 表紙 / Cover in TOC — do NOT call seek_reader_position(1)
+        # (which can jump forward to Page 1 disclaimer), and close toolbar so cover captures cleanly.
+        try:
+            if _is_reader_toolbar_in_viewport(page):
+                vp = page.viewport_size
+                cx = (vp["width"] / 2.0) if vp else 430.0
+                cy = (vp["height"] / 2.0) if vp else 600.0
+                page.mouse.click(cx, cy)
+                page.wait_for_timeout(350)
+        except Exception:
+            pass
+        return
     if not jumped_by_nav:
         _reveal_reader_toolbar(page)
         for prefer_page in (False, True):
