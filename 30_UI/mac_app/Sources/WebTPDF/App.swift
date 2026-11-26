@@ -3626,6 +3626,7 @@ struct ContentView: View {
                                 model.resumeQueueAutoRun()
                             }
                             .buttonStyle(.borderedProminent)
+                            .tint(.orange)
                         } else {
                             Button(model.t("自動実行を一時停止", "Pause Auto-Run")) {
                                 model.pauseQueueAutoRun()
@@ -3633,10 +3634,18 @@ struct ContentView: View {
                             .buttonStyle(.bordered)
                         }
 
-                        Button(model.t("キューを連続実行", "Run Queue")) {
-                            model.startQueue()
+                        if model.hasPendingQueueItems && !model.isRunning {
+                            Button(model.t("キューを連続実行", "Run Queue")) {
+                                model.startQueue()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.blue)
+                        } else {
+                            Button(model.t("キューを連続実行", "Run Queue")) {
+                                model.startQueue()
+                            }
+                            .disabled(true)
                         }
-                        .disabled(!model.hasPendingQueueItems || model.isRunning)
 
                         Button(model.t("失敗分を再実行", "Retry Failed")) {
                             model.retryFailedQueueItems()
@@ -4259,11 +4268,14 @@ struct ContentView: View {
                         Button(model.t("停止", "Stop"), role: .destructive) {
                             model.cancelJob()
                         }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
                     } else if pendingCount > 0 {
                         Button(model.t("キューを実行", "Run Queue")) {
                             model.startQueue()
                         }
                         .buttonStyle(.borderedProminent)
+                        .tint(.blue)
                     }
                 }
 
