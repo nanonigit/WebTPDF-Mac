@@ -1567,8 +1567,9 @@ def recover_reader_oops(
         return False
 
 
-READER_VIEWPORT_WIDTH = 1280
-READER_DEFAULT_HEIGHT = 1600
+READER_VIEWPORT_WIDTH = 860
+READER_LANDSCAPE_VIEWPORT_WIDTH = 1360
+READER_DEFAULT_HEIGHT = 1350
 
 READER_CHROME_HIDE_SCRIPT = """() => {
     const selectors = [
@@ -2642,9 +2643,10 @@ def fetch_via_browser(
                         if page_idx == 1 and created_page:
                             cover_ratio = measure_cover_aspect_ratio(reader_png)
                             if cover_ratio is not None:
-                                target_h = max(1300, min(2200, int(1040 * cover_ratio + 320)))
+                                target_w = READER_LANDSCAPE_VIEWPORT_WIDTH if cover_ratio < 1.15 else READER_VIEWPORT_WIDTH
+                                target_h = max(1000, min(1750, int(target_w * cover_ratio + 220)))
                                 try:
-                                    page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": target_h})
+                                    page.set_viewport_size({"width": target_w, "height": target_h})
                                     page.wait_for_timeout(800)
                                     k_res2 = capture_reader_page_as_pdf_bytes(page, cdp_session=cdp_session)
                                     if k_res2 is not None:
