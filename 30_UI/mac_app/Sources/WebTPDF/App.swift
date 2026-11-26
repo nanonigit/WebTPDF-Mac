@@ -287,6 +287,17 @@ final class AppModel: ObservableObject {
         var loadingPages: Int?
         var bookTitle: String? = nil
 
+        private static let historyTimestampFormatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "ja_JP")
+            formatter.dateFormat = "yyyy/MM/dd HH:mm"
+            return formatter
+        }()
+
+        var formattedTimestamp: String {
+            Self.historyTimestampFormatter.string(from: timestamp)
+        }
+
         var displayTitle: String {
             if let bookTitle, !bookTitle.isEmpty {
                 return bookTitle
@@ -4037,10 +4048,15 @@ struct ContentView: View {
                             }
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.displayTitle)
-                                    .font(.caption.weight(.medium))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+                                HStack(spacing: 8) {
+                                    Text(entry.displayTitle)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Text(entry.formattedTimestamp)
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
                                 if entry.displayTitle != entry.url {
                                     Text(entry.url)
                                         .font(.caption2)
@@ -4762,10 +4778,15 @@ struct ContentView: View {
                             }
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.displayTitle)
-                                    .font(.caption.weight(.medium))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+                                HStack(spacing: 8) {
+                                    Text(entry.displayTitle)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Text(entry.formattedTimestamp)
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
 
                                 HStack(spacing: 8) {
                                     Text(entry.direction.label(model.uiLanguage))
