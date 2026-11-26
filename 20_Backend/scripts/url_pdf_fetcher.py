@@ -265,7 +265,7 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
             | {single_indices[int(k * (len(single_indices) - 1) / max(1, sample_count - 1))] for k in range(sample_count)}
         )
 
-        def _non_white_bbox_in_canvas(blob: bytes, rw: float, rh: float) -> tuple[float, float, float, float] | None:
+        def _non_white_bbox_in_canvas(blob: bytes, rw: float, rh: float) -> tuple[tuple[float, float, float, float], float, bool] | None:
             with pymupdf.open(stream=blob, filetype="pdf") as d:
                 pix = d[0].get_pixmap(dpi=72)
                 if pix.width < 10 or pix.height < 10:
@@ -274,27 +274,43 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
                 bb = _content_bbox_stripping_letterbox(im)
                 if not bb:
                     return None
+                # Check if outer edges were dark/black letterbox bars and estimate artwork fill density inside bbox.
+                gray = im.convert("L")
+                top_val = gray.getpixel((pix.width // 2, 0))
+                bot_val = gray.getpixel((pix.width // 2, pix.height - 1))
+                has_dark_bar = (top_val <= 15 or bot_val <= 15) and (bb[1] > 2 or bb[3] < pix.height - 2)
+                crop_g = gray.crop(bb).resize((48, 48))
+                non_white = sum(1 for v in crop_g.getdata() if v < 240)
+                density = non_white / (48.0 * 48.0)
                 sx = rw / pix.width
                 sy = rh / pix.height
                 ox = (max_w - rw) / 2.0
                 oy = (max_h - rh) / 2.0
-                return (ox + bb[0] * sx, oy + bb[1] * sy, ox + bb[2] * sx, oy + bb[3] * sy)
+                return (ox + bb[0] * sx, oy + bb[1] * sy, ox + bb[2] * sx, oy + bb[3] * sy), density, has_dark_bar
 
         cover_bbox: tuple[float, float, float, float] | None = None
+        cover_density: float = 0.0
+        has_any_dark_bar = False
         sample_bboxes: list[tuple[float, float, float, float]] = []
         for idx in sample_indices:
             sz = rects[idx]
             if sz is None:
                 continue
-            bb = _non_white_bbox_in_canvas(pdf_blobs[idx], sz[0], sz[1])
-            if bb is None:
+            res = _non_white_bbox_in_canvas(pdf_blobs[idx], sz[0], sz[1])
+            if res is None:
                 continue
+            bb, density, is_dark = res
+            if is_dark:
+                has_any_dark_bar = True
             if (bb[2] - bb[0]) >= max_w * 0.15 and (bb[3] - bb[1]) >= max_h * 0.15:
                 sample_bboxes.append(bb)
                 if idx == single_indices[0]:
                     cover_bbox = bb
+                    cover_density = density
 
-        # Compute uniform book crop rect with a clean ~1.5% margin around the book-wide union.
+        # Compute uniform book crop rect:
+        # - For black-letterboxed fixed-layout books, trim cleanly to 0pt so zero black bars remain.
+        # - For white-background text books, only trim excessive margins (>6%) and keep a clean 3% reading margin.
         crop_x0, crop_y0, crop_x1, crop_y1 = 0.0, 0.0, max_w, max_h
         if sample_bboxes:
             ux0 = min(b[0] for b in sample_bboxes)
@@ -304,14 +320,18 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
             uw = ux1 - ux0
             uh = uy1 - uy0
             if uw >= max_w * 0.35 and uh >= max_h * 0.35:
-                pad_x = 2.0
-                pad_y = 2.0
+                if has_any_dark_bar:
+                    pad_x, pad_y = 0.0, 0.0
+                    threshold = 0.99
+                else:
+                    pad_x = max(12.0, uw * 0.03)
+                    pad_y = max(14.0, uh * 0.03)
+                    threshold = 0.94
                 cx0 = max(0.0, ux0 - pad_x)
                 cy0 = max(0.0, uy0 - pad_y)
                 cx1 = min(max_w, ux1 + pad_x)
                 cy1 = min(max_h, uy1 + pad_y)
-                # Only apply book-wide crop when it removes noticeable outer white letterbox (>1.5%).
-                if (cx1 - cx0) < max_w * 0.985 or (cy1 - cy0) < max_h * 0.985:
+                if (cx1 - cx0) < max_w * threshold or (cy1 - cy0) < max_h * threshold:
                     crop_x0, crop_y0, crop_x1, crop_y1 = cx0, cy0, cx1, cy1
 
         out_w = round(crop_x1 - crop_x0, 2)
@@ -325,13 +345,13 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
                 continue
             rw, rh = sz
             is_cover = (idx == single_indices[0])
-            # If the cover artwork is much smaller than the uniform book page (e.g. centered letterboxed cover),
-            # aspect-fit the cover artwork cleanly into the exact same (out_w x out_h) page size.
+            # Only aspect-fit Page 0 when it is a genuine illustrated cover (density >= 0.25),
+            # never when Page 0 is a sparse text page (e.g. 3-line disclaimer).
             fit_cover = False
-            if is_cover and cover_bbox is not None:
+            if is_cover and cover_bbox is not None and cover_density >= 0.25:
                 cw = cover_bbox[2] - cover_bbox[0]
                 ch = cover_bbox[3] - cover_bbox[1]
-                if cw > 50 and ch > 50 and (cw < out_w * 0.86 or ch < out_h * 0.86):
+                if cw >= max_w * 0.45 and ch >= max_h * 0.35 and (cw < out_w * 0.86 or ch < out_h * 0.86):
                     fit_cover = True
 
             if not trimmed and not fit_cover and abs(rw - out_w) <= 1.0 and abs(rh - out_h) <= 1.0:
