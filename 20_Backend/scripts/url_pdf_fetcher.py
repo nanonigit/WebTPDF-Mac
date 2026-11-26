@@ -193,6 +193,44 @@ def _infer_saved_viewport_width(captures: list) -> int:
     return READER_VIEWPORT_WIDTH
 
 
+def _content_bbox_stripping_letterbox(im: Image.Image) -> tuple[int, int, int, int] | None:
+    """Peel uniform solid-white (>=245) or solid-black (<=15) outer letterbox bars from all 4 edges."""
+    rgb = im.convert("RGB")
+    w, h = rgb.size
+    if w < 10 or h < 10:
+        return None
+    gray = rgb.convert("L")
+    px = gray.load()
+
+    def _is_uniform_bg_row(y: int) -> bool:
+        step = max(1, w // 64)
+        vals = [px[x, y] for x in range(0, w, step)]
+        return all(v >= 245 for v in vals) or all(v <= 15 for v in vals)
+
+    def _is_uniform_bg_col(x: int, y0: int, y1: int) -> bool:
+        step = max(1, (y1 - y0) // 64)
+        vals = [px[x, y] for y in range(y0, y1, step)]
+        return all(v >= 245 for v in vals) or all(v <= 15 for v in vals)
+
+    top = 0
+    while top < h - 1 and _is_uniform_bg_row(top):
+        top += 1
+    bottom = h
+    while bottom > top + 1 and _is_uniform_bg_row(bottom - 1):
+        bottom -= 1
+    if bottom - top < 10:
+        return None
+    left = 0
+    while left < w - 1 and _is_uniform_bg_col(left, top, bottom):
+        left += 1
+    right = w
+    while right > left + 1 and _is_uniform_bg_col(right - 1, top, bottom):
+        right -= 1
+    if right - left < 10:
+        return None
+    return (left, top, right, bottom)
+
+
 def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
     """Normalize all reader pages to one uniform book size and trim shared outer white letterbox margins."""
     if len(pdf_blobs) < 2:
@@ -233,7 +271,7 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
                 if pix.width < 10 or pix.height < 10:
                     return None
                 im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                bb = im.point(lambda x: 0 if x > 246 else 255).getbbox()
+                bb = _content_bbox_stripping_letterbox(im)
                 if not bb:
                     return None
                 sx = rw / pix.width
@@ -2244,10 +2282,10 @@ def capture_reader_page_as_pdf_bytes(
 
 
 def measure_cover_aspect_ratio(png_bytes: bytes) -> float | None:
-    """Estimate height/width ratio of non-white cover artwork in png_bytes (portrait or landscape)."""
+    """Estimate height/width ratio of cover artwork in png_bytes, stripping both white and black letterbox bars."""
     try:
         with Image.open(io.BytesIO(png_bytes)) as im:
-            bbox = im.convert("RGB").point(lambda x: 0 if x > 245 else 255).getbbox()
+            bbox = _content_bbox_stripping_letterbox(im)
             if not bbox:
                 return None
 
