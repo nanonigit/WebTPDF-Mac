@@ -176,6 +176,23 @@ def find_next_page_url(html: str | bytes, current_url: str) -> str | None:
 
 
 
+def _infer_saved_viewport_width(captures: list) -> int:
+    """Infer portrait (860) vs landscape (1360) viewport width from saved cover PDF."""
+    if not captures:
+        return READER_VIEWPORT_WIDTH
+    try:
+        import pymupdf
+
+        with pymupdf.open(stream=captures[0].pdf, filetype="pdf") as doc:
+            if len(doc) > 0:
+                r = doc[0].rect
+                if r.width > 100 and r.height > 100 and (r.height / r.width) < 1.15:
+                    return READER_LANDSCAPE_VIEWPORT_WIDTH
+    except Exception:
+        pass
+    return READER_VIEWPORT_WIDTH
+
+
 def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
     """Ensure sparse interior reader pages (e.g. 1-line copyright or half-page TOC) are not narrower/shorter than cover."""
     if len(pdf_blobs) < 2:
@@ -183,13 +200,24 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
     try:
         import pymupdf
 
-        with pymupdf.open(stream=pdf_blobs[0], filetype="pdf") as cover_doc:
-            if len(cover_doc) == 0:
-                return pdf_blobs
-            cover_rect = cover_doc[0].rect
-            cover_w, cover_h = cover_rect.width, cover_rect.height
-        if cover_w < 100 or cover_h < 100:
+        sample_rects: list[tuple[float, float]] = []
+        for blob in pdf_blobs[: min(8, len(pdf_blobs))]:
+            with pymupdf.open(stream=blob, filetype="pdf") as d:
+                if len(d) > 0:
+                    r = d[0].rect
+                    if r.width >= 100 and r.height >= 100:
+                        sample_rects.append((r.width, r.height))
+        if not sample_rects:
             return pdf_blobs
+
+        cover_w, cover_h = sample_rects[0]
+        max_sample_w = max(w for w, _ in sample_rects)
+        max_sample_h = max(h for _, h in sample_rects)
+        # Guard against books that did not start on the cover (e.g. sparse first captured page)
+        if cover_w < max_sample_w * 0.75:
+            cover_w = max_sample_w
+        if cover_h < max_sample_h * 0.75:
+            cover_h = max_sample_h
 
         normalized: list[bytes] = [pdf_blobs[0]]
         for blob in pdf_blobs[1:]:
@@ -722,7 +750,7 @@ def is_reader_not_at_start(page) -> bool:
         cur = get_reader_page_number(page)
         if cur is not None and cur > 1:
             return True
-        m_pct = re.search(r"●\s*([1-9]\d*)%", body_text)
+        m_pct = re.search(r"[●•]\s*([1-9]\d*)%", body_text)
         if m_pct:
             return True
     except Exception:
@@ -731,7 +759,15 @@ def is_reader_not_at_start(page) -> bool:
 
 
 def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
-    """Step backwards in paginated ebook reader until reaching the first page (cover)."""
+    """Jump to Location 1 via Go to Location when available, else step backwards to cover."""
+    try:
+        if jump_to_reader_location(page, 1, prefer_page=False):
+            page.wait_for_timeout(500)
+            if not is_reader_not_at_start(page):
+                log("[Reader] Jumped to Location 1 via Go to Location.")
+                return
+    except Exception:
+        pass
     reverse_key = "ArrowRight" if turn_key == "ArrowLeft" else "ArrowLeft"
     log(f"[Reader] Not at first page; rewinding to start via {reverse_key}...")
     unchanged = 0
@@ -2164,7 +2200,7 @@ def finish_reader_at_end(
                 browser = p.chromium.connect_over_cdp(endpoint)
                 page = browser.contexts[0].new_page()
                 try:
-                    page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": captures[-1].viewport_height or READER_DEFAULT_HEIGHT})
+                    page.set_viewport_size({"width": _infer_saved_viewport_width(captures), "height": captures[-1].viewport_height or READER_DEFAULT_HEIGHT})
                     page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
                     if not _wait_for_reader_reader(page):
                         raise RuntimeError("The book did not reopen")
@@ -2317,7 +2353,7 @@ def fetch_via_browser(
             if saved_pages:
                 log(f"[Reader] Loaded {len(saved_pages)} saved page(s); resuming capture.")
                 if reader_mode and saved_pages[-1].viewport_height is not None:
-                    page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": saved_pages[-1].viewport_height})
+                    page.set_viewport_size({"width": _infer_saved_viewport_width(saved_pages), "height": saved_pages[-1].viewport_height})
                 elif not reader_mode and reader_checkpoint is not None:
                     resume_url, restored_skipped_steps = reader_checkpoint.load_resume_state()
                     if resume_url and resume_url != page.url:
