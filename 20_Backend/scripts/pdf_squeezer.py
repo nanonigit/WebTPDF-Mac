@@ -10,6 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from PIL import Image, ImageChops
 import pymupdf as fitz
 
 
@@ -37,13 +38,145 @@ def format_bytes(size: int) -> str:
     return f"{size} B"
 
 
+TRIM_PAD_PT = 4.0
+
+
+def _find_horizontal_content_bands(im: Image.Image) -> list[tuple[int, int]]:
+    """Return contiguous vertical [y0, y1] bands containing non-white pixels."""
+    bg = Image.new("RGB", im.size, (255, 255, 255))
+    diff = ImageChops.difference(im, bg).convert("L")
+    w, h = diff.size
+    px = diff.load()
+    row_has = []
+    step_x = 2 if w > 200 else 1
+    for y in range(h):
+        has = False
+        for x in range(0, w, step_x):
+            if px[x, y] > 15:
+                has = True
+                break
+        row_has.append(has)
+
+    bands: list[tuple[int, int]] = []
+    in_band = False
+    start = 0
+    gap = 0
+    for y, has in enumerate(row_has):
+        if has:
+            if not in_band:
+                start = y
+                in_band = True
+            gap = 0
+        elif in_band:
+            gap += 1
+            if gap > 5:
+                bands.append((start, y - gap))
+                in_band = False
+    if in_band:
+        bands.append((start, h - 1 - gap))
+    return bands
+
+
+def _strip_reader_chrome_bands(
+    bands: list[tuple[int, int]],
+    page_height: int,
+) -> list[tuple[int, int]]:
+    """Remove top Kindle toolbar and bottom scrubber/Location bands when clearly separated."""
+    if len(bands) <= 1:
+        return bands
+
+    filtered = list(bands)
+    # Strip top toolbar band (thin bar near top separated by >= 12px gap)
+    if len(filtered) >= 2:
+        top_y0, top_y1 = filtered[0]
+        next_y0, _ = filtered[1]
+        if top_y1 <= page_height * 0.14 and (top_y1 - top_y0) <= 65 and (next_y0 - top_y1) >= 12:
+            filtered.pop(0)
+
+    # Strip bottom scrubber / Location bands (thin bars near bottom separated by >= 18px gap)
+    while len(filtered) >= 2:
+        bot_y0, bot_y1 = filtered[-1]
+        prev_y0, prev_y1 = filtered[-2]
+        if bot_y0 >= page_height * 0.80 and (bot_y1 - bot_y0) <= 50 and (bot_y0 - prev_y1) >= 15:
+            filtered.pop()
+        else:
+            break
+    return filtered
+
+
+def _measure_page_content_rect(page: fitz.Page) -> fitz.Rect | None:
+    """Measure a page's non-white content rect (at 1x point scale) excluding reader chrome."""
+    pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+    im = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    bands = _strip_reader_chrome_bands(_find_horizontal_content_bands(im), pix.height)
+    if not bands:
+        return None
+
+    y0 = max(0, bands[0][0])
+    y1 = min(pix.height, bands[-1][1] + 1)
+    cropped_y = im.crop((0, y0, pix.width, y1))
+    bg = Image.new("RGB", cropped_y.size, (255, 255, 255))
+    bbox = ImageChops.difference(cropped_y, bg).getbbox()
+    if not bbox:
+        return None
+
+    x0 = max(0.0, float(bbox[0]) - TRIM_PAD_PT)
+    x1 = min(float(pix.width), float(bbox[2]) + TRIM_PAD_PT)
+    top = max(0.0, float(y0 + bbox[1]) - TRIM_PAD_PT)
+    bot = min(float(pix.height), float(y0 + bbox[3]) + TRIM_PAD_PT)
+
+    # Map pixel rect back to page mediabox coordinates
+    mb = page.mediabox
+    sx = mb.width / float(pix.width) if pix.width else 1.0
+    sy = mb.height / float(pix.height) if pix.height else 1.0
+    return fitz.Rect(mb.x0 + x0 * sx, mb.y0 + top * sy, mb.x0 + x1 * sx, mb.y0 + bot * sy)
+
+
+def trim_pdf_to_cover(doc: fitz.Document) -> int:
+    """Trim margins and reader UI chrome across all pages using cover dimensions as baseline."""
+    if len(doc) == 0:
+        return 0
+
+    cover_rect = _measure_page_content_rect(doc[0])
+    cover_w = cover_rect.width if cover_rect and cover_rect.width > 50 else None
+    cover_h = cover_rect.height if cover_rect and cover_rect.height > 50 else None
+
+    trimmed_pages = 0
+    for idx in range(len(doc)):
+        page = doc[idx]
+        mb = page.mediabox
+        content = _measure_page_content_rect(page)
+        if content is None or content.width <= 20 or content.height <= 20:
+            continue
+
+        target = fitz.Rect(content)
+        if cover_w is not None and cover_h is not None and idx > 0:
+            # Expand symmetrically to at least cover size when it fits inside the page mediabox
+            if target.width < cover_w:
+                cx = (target.x0 + target.x1) / 2.0
+                target.x0 = max(mb.x0, cx - cover_w / 2.0)
+                target.x1 = min(mb.x1, cx + cover_w / 2.0)
+            if target.height < cover_h:
+                cy = (target.y0 + target.y1) / 2.0
+                target.y0 = max(mb.y0, cy - cover_h / 2.0)
+                target.y1 = min(mb.y1, cy + cover_h / 2.0)
+
+        target &= mb
+        if target.width > 20 and target.height > 20:
+            page.set_cropbox(target)
+            trimmed_pages += 1
+    return trimmed_pages
+
+
 def compress_pdf(
     input_path: Path,
     output_path: Path,
     preset: CompressionPreset,
     in_place: bool = False,
+    trim_to_cover: bool = False,
+    no_compress: bool = False,
 ) -> tuple[int, int, bool]:
-    """Compress a single PDF and return (before_bytes, after_bytes, replaced_or_written)."""
+    """Compress and/or trim a single PDF and return (before_bytes, after_bytes, replaced_or_written)."""
     before_bytes = input_path.stat().st_size
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -57,16 +190,19 @@ def compress_pdf(
 
     try:
         with fitz.open(str(input_path)) as doc:
-            doc.rewrite_images(
-                dpi_threshold=preset.dpi_threshold,
-                dpi_target=preset.dpi_target,
-                quality=preset.quality,
-                lossy=True,
-                lossless=True,
-                bitonal=True,
-                color=True,
-                gray=True,
-            )
+            if trim_to_cover:
+                trim_pdf_to_cover(doc)
+            if not no_compress:
+                doc.rewrite_images(
+                    dpi_threshold=preset.dpi_threshold,
+                    dpi_target=preset.dpi_target,
+                    quality=preset.quality,
+                    lossy=True,
+                    lossless=True,
+                    bitonal=True,
+                    color=True,
+                    gray=True,
+                )
             doc.save(
                 str(tmp_path),
                 garbage=4,
@@ -78,7 +214,7 @@ def compress_pdf(
             )
 
         after_bytes = tmp_path.stat().st_size
-        if in_place and after_bytes >= before_bytes:
+        if in_place and not trim_to_cover and after_bytes >= before_bytes:
             tmp_path.unlink(missing_ok=True)
             return before_bytes, before_bytes, False
 
@@ -244,11 +380,15 @@ def main() -> int:
     parser.add_argument("--in-place", action="store_true", help="Overwrite original PDF when smaller")
     parser.add_argument("--recursive", action="store_true", help="Scan subdirectories when input is a folder")
     parser.add_argument("--max-size-mb", type=float, default=0.0, help="Split compressed PDF into <= N MB parts inside a dedicated folder")
+    parser.add_argument("--trim-to-cover", action="store_true", help="Trim margins and Kindle Reader chrome using cover dimensions")
+    parser.add_argument("--no-compress", action="store_true", help="Skip image recompression (useful when only trimming)")
     args = parser.parse_args()
 
     preset = PRESETS[args.preset]
     max_bytes = int(args.max_size_mb * 1024 * 1024) if args.max_size_mb and args.max_size_mb > 0 else 0
     in_place = args.in_place and max_bytes == 0
+    trim_to_cover = bool(args.trim_to_cover)
+    no_compress = bool(args.no_compress)
     pdfs = collect_pdfs([Path(p) for p in args.inputs], recursive=args.recursive)
     if not pdfs:
         print("Error: No PDF files found.", file=sys.stderr, flush=True)
@@ -260,7 +400,9 @@ def main() -> int:
     total_count = len(pdfs)
 
     mode_desc = f"split<={args.max_size_mb:g}MB" if max_bytes > 0 else f"in_place={in_place}"
-    print(f"[Squeezer] Starting ({total_count} file(s), preset={preset.name}, {mode_desc})", flush=True)
+    trim_desc = ", trim_to_cover=True" if trim_to_cover else ""
+    comp_desc = ", no_compress=True" if no_compress else ""
+    print(f"[Squeezer] Starting ({total_count} file(s), preset={preset.name}, {mode_desc}{trim_desc}{comp_desc})", flush=True)
 
     for idx, src in enumerate(pdfs, start=1):
         if max_bytes > 0:
@@ -274,7 +416,14 @@ def main() -> int:
                 ) as tmp:
                     tmp_compressed = Path(tmp.name)
                 try:
-                    before, compressed_bytes, _ = compress_pdf(src, tmp_compressed, preset=preset, in_place=False)
+                    before, compressed_bytes, _ = compress_pdf(
+                        src,
+                        tmp_compressed,
+                        preset=preset,
+                        in_place=False,
+                        trim_to_cover=trim_to_cover,
+                        no_compress=no_compress,
+                    )
                     parts = split_pdf_by_size(tmp_compressed, split_folder, src.stem, max_bytes=max_bytes)
                 finally:
                     tmp_compressed.unlink(missing_ok=True)
@@ -302,11 +451,20 @@ def main() -> int:
             dst = src
         elif output_dir is not None:
             dst = output_dir / src.name
+        elif trim_to_cover and no_compress:
+            dst = src.with_name(f"{src.stem}_trimmed.pdf")
         else:
             dst = src.with_name(f"{src.stem}_compressed.pdf")
 
         try:
-            before, after, written = compress_pdf(src, dst, preset=preset, in_place=in_place)
+            before, after, written = compress_pdf(
+                src,
+                dst,
+                preset=preset,
+                in_place=in_place,
+                trim_to_cover=trim_to_cover,
+                no_compress=no_compress,
+            )
             total_before += before
             total_after += after
             saved_pct = ((before - after) / before * 100.0) if before > 0 else 0.0

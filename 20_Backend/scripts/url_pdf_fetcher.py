@@ -1375,9 +1375,14 @@ def matches_saved_reader_image(screenshot: bytes, saved_pdf: bytes, *, same_prin
             with Image.open(io.BytesIO(saved_image)) as saved:
                 w, h = current.size
                 pad_x, pad_y = max(24, round(w * 0.07)), max(32, round(h * 0.07))
-                if saved.size != (w + 2 * pad_x, h + 2 * pad_y):
-                    return False
-                saved = saved.crop((pad_x, pad_y, pad_x + w, pad_y + h))
+                if saved.size == (w + 2 * pad_x, h + 2 * pad_y):
+                    saved = saved.crop((pad_x, pad_y, pad_x + w, pad_y + h))
+                else:
+                    # Handle trimmed/padded captures with custom margin ratios
+                    cur_trim = _trim_outer_white_margin(current.convert("RGB"), pad_ratio=0.0)
+                    sav_trim = _trim_outer_white_margin(saved.convert("RGB"), pad_ratio=0.0)
+                    current = cur_trim
+                    saved = sav_trim
                 size = (128, 128)
                 current_luma, saved_luma = current.convert("L").resize(size), saved.convert("L").resize(size)
                 if same_printed_page:
@@ -1518,53 +1523,147 @@ def recover_reader_oops(
         return False
 
 
-def _find_reader_page_box(page) -> dict | None:
-    """Return the bounding box of the largest visible Reader blob page image."""
+READER_VIEWPORT_WIDTH = 1280
+READER_DEFAULT_HEIGHT = 1600
+
+READER_CHROME_HIDE_SCRIPT = """() => {
+    const selectors = [
+        'header', 'footer', 'nav', 'ion-header', 'ion-footer',
+        '#reader-header', '#reader-footer',
+        '#kr-chevron-left', '#kr-chevron-right',
+        '[class*="kr-header" i]', '[class*="kr-footer" i]',
+        '[class*="scrubber" i]', '[aria-label="Reader menu"]',
+        '[aria-label="メニュー"]'
+    ];
+    for (const sel of selectors) {
+        document.querySelectorAll(sel).forEach(el => {
+            if (!el.hasAttribute('data-ec-reader-hide')) {
+                el.setAttribute('data-ec-reader-hide', el.style.display || '');
+                el.style.setProperty('display', 'none', 'important');
+            }
+        });
+    }
+}"""
+
+READER_CHROME_RESTORE_SCRIPT = """() => {
+    document.querySelectorAll('[data-ec-reader-hide]').forEach(el => {
+        el.style.display = el.getAttribute('data-ec-reader-hide');
+        el.removeAttribute('data-ec-reader-hide');
+    });
+}"""
+
+
+def _hide_reader_chrome(page) -> None:
     try:
-        imgs = page.locator("img[src^='blob:']")
-        count = imgs.count()
-        best_box = None
-        best_area = 0.0
-        for i in range(count):
-            image = imgs.nth(i)
-            if not image.evaluate("(img) => img.complete && img.naturalWidth > 0"):
-                continue
-            box = image.bounding_box(timeout=1000)
-            if not box:
-                continue
-            w, h = box.get("width", 0.0), box.get("height", 0.0)
-            if w > 100 and h > 100 and (w * h) > best_area:
-                best_area = w * h
-                best_box = box
-        return best_box
+        page.evaluate(READER_CHROME_HIDE_SCRIPT)
     except Exception:
-        return None
+        pass
 
 
+def _restore_reader_chrome(page) -> None:
+    try:
+        page.evaluate(READER_CHROME_RESTORE_SCRIPT)
+    except Exception:
+        pass
 
-def capture_reader_page_as_pdf_bytes(page, pad_ratio: float = 0.07) -> tuple[bytes, bytes] | None:
-    """Capture the rendered Reader page blob image via clipped screenshot with comfortable book margins."""
+
+def _find_reader_page_box_in_scope(scope) -> dict | None:
+    """Return the bounding box of the largest visible Reader content element in scope."""
+    selectors = [
+        ("img[src^='blob:']", True),
+        ("canvas", False),
+        ("img:not(header img):not(nav img):not(footer img):not(ion-header img):not(ion-footer img)", True),
+    ]
+    for selector, check_img in selectors:
+        try:
+            items = scope.locator(selector)
+            count = items.count()
+            best_box = None
+            best_area = 0.0
+            for i in range(count):
+                el = items.nth(i)
+                if check_img:
+                    if not el.evaluate("(img) => img.complete && img.naturalWidth > 100 && img.naturalHeight > 100"):
+                        continue
+                else:
+                    if not el.evaluate("(c) => c.width > 100 && c.height > 100"):
+                        continue
+                box = el.bounding_box(timeout=1000)
+                if not box:
+                    continue
+                w, h = box.get("width", 0.0), box.get("height", 0.0)
+                if w > 150 and h > 150 and (w * h) > best_area:
+                    best_area = w * h
+                    best_box = box
+            if best_box is not None:
+                return best_box
+        except Exception:
+            continue
+    return None
+
+
+def _find_reader_page_box(page) -> dict | None:
+    """Return the bounding box of the largest visible Reader page image or canvas."""
+    box = _find_reader_page_box_in_scope(page)
+    if box is not None:
+        return box
+    try:
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            box = _find_reader_page_box_in_scope(frame)
+            if box is not None:
+                return box
+    except Exception:
+        pass
+    return None
+
+
+def _trim_outer_white_margin(rgb: Image.Image, pad_ratio: float = 0.015) -> Image.Image:
+    """Crop excessive outer white borders while keeping a small clean margin."""
+    try:
+        bbox = rgb.point(lambda x: 0 if x > 246 else 255).getbbox()
+        if bbox:
+            cw = bbox[2] - bbox[0]
+            ch = bbox[3] - bbox[1]
+            if cw > 100 and ch > 100:
+                rgb = rgb.crop(bbox)
+    except Exception:
+        pass
+    if pad_ratio > 0:
+        pad_x = max(8, int(round(rgb.width * pad_ratio)))
+        pad_y = max(10, int(round(rgb.height * pad_ratio)))
+        canvas = Image.new("RGB", (rgb.width + 2 * pad_x, rgb.height + 2 * pad_y), (255, 255, 255))
+        canvas.paste(rgb, (pad_x, pad_y))
+        return canvas
+    return rgb
+
+
+def capture_reader_page_as_pdf_bytes(
+    page,
+    pad_ratio: float = 0.015,
+    cdp_session=None,
+) -> tuple[bytes, bytes] | None:
+    """Capture the rendered Reader page via high-res clipped screenshot with clean margins."""
     box = _find_reader_page_box(page)
     if not box:
         return None
 
-    png_bytes = page.screenshot(clip=box, timeout=15000)
+    _hide_reader_chrome(page)
+    try:
+        png_bytes = page.screenshot(clip=box, timeout=15000)
+    finally:
+        _restore_reader_chrome(page)
+
     buf = io.BytesIO()
     with Image.open(io.BytesIO(png_bytes)) as img:
-        rgb = img.convert("RGB")
-        if pad_ratio > 0:
-            pad_x = max(24, int(round(rgb.width * pad_ratio)))
-            pad_y = max(32, int(round(rgb.height * pad_ratio)))
-            canvas = Image.new("RGB", (rgb.width + 2 * pad_x, rgb.height + 2 * pad_y), (255, 255, 255))
-            canvas.paste(rgb, (pad_x, pad_y))
-            canvas.save(buf, "PDF")
-        else:
-            rgb.save(buf, "PDF")
+        rgb = _trim_outer_white_margin(img.convert("RGB"), pad_ratio=pad_ratio)
+        rgb.save(buf, "PDF")
     return buf.getvalue(), png_bytes
 
 
 def measure_cover_aspect_ratio(png_bytes: bytes) -> float | None:
-    """Estimate portrait height/width ratio of non-white cover artwork in png_bytes."""
+    """Estimate height/width ratio of non-white cover artwork in png_bytes (portrait or landscape)."""
     try:
         with Image.open(io.BytesIO(png_bytes)) as im:
             bbox = im.convert("RGB").point(lambda x: 0 if x > 245 else 255).getbbox()
@@ -1573,8 +1672,8 @@ def measure_cover_aspect_ratio(png_bytes: bytes) -> float | None:
 
             cw = bbox[2] - bbox[0]
             ch = bbox[3] - bbox[1]
-            if cw > 100 and ch > 100 and ch > cw:
-                return max(1.25, min(1.65, ch / cw))
+            if cw > 100 and ch > 100:
+                return max(0.65, min(1.65, ch / cw))
     except Exception:
         pass
     return None
@@ -1633,10 +1732,20 @@ def capture_page_as_pdf_bytes(page, cdp_session=None) -> bytes:
             )
             return strip_trailing_blank_pages(data) if fixed_layout else data
         except Exception:
-            png_bytes = page.screenshot(full_page=False)
+            reader_mode = is_paginated_reader(page)
+            if reader_mode:
+                _hide_reader_chrome(page)
+            try:
+                png_bytes = page.screenshot(full_page=False)
+            finally:
+                if reader_mode:
+                    _restore_reader_chrome(page)
             buf = io.BytesIO()
             with Image.open(io.BytesIO(png_bytes)) as img:
-                img.convert("RGB").save(buf, "PDF")
+                rgb = img.convert("RGB")
+                if reader_mode:
+                    rgb = _trim_outer_white_margin(rgb, pad_ratio=0.015)
+                rgb.save(buf, "PDF")
             return buf.getvalue()
     finally:
         remove_print_cleanup(page)
@@ -1987,7 +2096,7 @@ def finish_reader_at_end(
                 browser = p.chromium.connect_over_cdp(endpoint)
                 page = browser.contexts[0].new_page()
                 try:
-                    page.set_viewport_size({"width": 800, "height": captures[-1].viewport_height or 1140})
+                    page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": captures[-1].viewport_height or READER_DEFAULT_HEIGHT})
                     page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
                     if not _wait_for_reader_reader(page):
                         raise RuntimeError("The book did not reopen")
@@ -2103,7 +2212,7 @@ def fetch_via_browser(
             page.on("response", handle_response)
             if created_page and "read.amazon." in start_url.lower():
                 try:
-                    page.set_viewport_size({"width": 800, "height": 1140})
+                    page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": READER_DEFAULT_HEIGHT})
                 except Exception:
                     pass
             response_status: int | None = None
@@ -2137,7 +2246,7 @@ def fetch_via_browser(
             if saved_pages:
                 log(f"[Reader] Loaded {len(saved_pages)} saved page(s); resuming capture.")
                 if reader_mode and saved_pages[-1].viewport_height is not None:
-                    page.set_viewport_size({"width": 800, "height": saved_pages[-1].viewport_height})
+                    page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": saved_pages[-1].viewport_height})
                 elif not reader_mode and reader_checkpoint is not None:
                     resume_url, restored_skipped_steps = reader_checkpoint.load_resume_state()
                     if resume_url and resume_url != page.url:
@@ -2151,7 +2260,7 @@ def fetch_via_browser(
                 dismiss_reader_dialogs(page)
                 if created_page:
                     try:
-                        page.set_viewport_size({"width": 800, "height": 1140})
+                        page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": READER_DEFAULT_HEIGHT})
                         page.wait_for_timeout(800)
                     except Exception:
                         pass
@@ -2259,7 +2368,7 @@ def fetch_via_browser(
                                 if page.viewport_size:
                                     candidate.set_viewport_size(page.viewport_size)
                                 elif created_page:
-                                    candidate.set_viewport_size({"width": 800, "height": 1140})
+                                    candidate.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": READER_DEFAULT_HEIGHT})
                                 recovered = recover_reader_oops(
                                     candidate, start_url, last_reader_page, turn_key,
                                     fresh_tab=True, **recovery_options,
@@ -2459,17 +2568,17 @@ def fetch_via_browser(
                         _wait_for_reader_reader(page, timeout_ms=8000)
                     if is_reader_oops(page):
                         continue
-                    k_res = capture_reader_page_as_pdf_bytes(page)
+                    k_res = capture_reader_page_as_pdf_bytes(page, cdp_session=cdp_session)
                     if k_res is not None:
                         page_pdf_bytes, reader_png = k_res
                         if page_idx == 1 and created_page:
                             cover_ratio = measure_cover_aspect_ratio(reader_png)
                             if cover_ratio is not None:
-                                target_h = max(900, min(1400, int(640 * cover_ratio + 150)))
+                                target_h = max(1000, min(2000, int(1040 * cover_ratio + 180)))
                                 try:
-                                    page.set_viewport_size({"width": 800, "height": target_h})
+                                    page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": target_h})
                                     page.wait_for_timeout(800)
-                                    k_res2 = capture_reader_page_as_pdf_bytes(page)
+                                    k_res2 = capture_reader_page_as_pdf_bytes(page, cdp_session=cdp_session)
                                     if k_res2 is not None:
                                         page_pdf_bytes, reader_png = k_res2
                                 except Exception:

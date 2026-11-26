@@ -357,6 +357,8 @@ final class AppModel: ObservableObject {
     @Published var squeezerPreset: PDFCompressionPreset = .balanced
     @Published var squeezerInPlace = false
     @Published var squeezerSplitEnabled = false
+    @Published var squeezerTrimToCover = false
+    @Published var squeezerSkipCompression = false
     @Published var squeezerMaxSizeMB = "10"
     @Published var squeezerOutputDirectory: URL?
     @Published private(set) var isSqueezingPDF = false
@@ -659,6 +661,12 @@ final class AppModel: ObservableObject {
             "--input", target.path,
             "--preset", squeezerPreset.rawValue,
         ]
+        if squeezerTrimToCover {
+            args.append("--trim-to-cover")
+            if squeezerSkipCompression {
+                args.append("--no-compress")
+            }
+        }
         if let maxSizeValue {
             args += ["--max-size-mb", String(maxSizeValue)]
             if let outDir = squeezerOutputDirectory {
@@ -4183,6 +4191,21 @@ struct ContentView: View {
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
+                        }
+
+                        Toggle(
+                            model.t("表紙サイズ基準で余白カット（Kindleのツールバー・下部バーも自動除去）", "Trim margins to cover size (also strips Kindle toolbar/footer)"),
+                            isOn: $model.squeezerTrimToCover
+                        )
+                        .disabled(model.isRunning)
+
+                        if model.squeezerTrimToCover {
+                            Toggle(
+                                model.t("画質を落とさず余白カットのみ実行（再圧縮しない）", "Trim only without recompression (keeps original quality)"),
+                                isOn: $model.squeezerSkipCompression
+                            )
+                            .disabled(model.isRunning)
+                            .padding(.leading, 20)
                         }
 
                         Toggle(
