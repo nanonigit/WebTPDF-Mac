@@ -3872,6 +3872,23 @@ struct ContentView: View {
                                     .foregroundStyle(model.queueDisplayTitle(for: item) == nil ? .primary : .secondary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                if item.status == .running {
+                                    if let pages = model.activeFetchCapturedPages {
+                                        if let total = model.activeFetchExpectedPages, total > 0 {
+                                            Text(model.t("取得中: \(pages) / \(total) ページ", "Downloading: \(pages) / \(total) pages"))
+                                                .font(.caption2.monospacedDigit().weight(.medium))
+                                                .foregroundStyle(.blue)
+                                        } else {
+                                            Text(model.t("取得中: \(pages) ページ", "Downloading: \(pages) pages"))
+                                                .font(.caption2.monospacedDigit().weight(.medium))
+                                                .foregroundStyle(.blue)
+                                        }
+                                    } else {
+                                        Text(model.t("ページ読み込み中…", "Loading pages…"))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
 
