@@ -32,11 +32,85 @@ struct WebTPDFApp: App {
 }
 
 @MainActor
+final class WindowCloseInterceptor: NSObject, NSWindowDelegate {
+    weak var originalDelegate: NSWindowDelegate?
+    weak var appDelegate: AppDelegate?
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if aSelector == #selector(NSWindowDelegate.windowShouldClose(_:)) {
+            return true
+        }
+        return originalDelegate?.responds(to: aSelector) ?? super.responds(to: aSelector)
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if let original = originalDelegate, original.responds(to: aSelector) {
+            return original
+        }
+        return super.forwardingTarget(for: aSelector)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if let appDelegate, !appDelegate.confirmExitIfBusy() {
+            return false
+        }
+        if NSApp.windows.filter({ $0.isVisible }).count <= 1 {
+            appDelegate?.confirmedQuitOnce = true
+        }
+        if let original = originalDelegate,
+           original.responds(to: #selector(NSWindowDelegate.windowShouldClose(_:))) {
+            return original.windowShouldClose?(sender) ?? true
+        }
+        return true
+    }
+}
+
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     weak var model: AppModel?
+    var confirmedQuitOnce = false
+    private var windowInterceptors: [ObjectIdentifier: WindowCloseInterceptor] = [:]
+    private var windowObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
+        attachCloseInterceptors()
+        windowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeMainNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.attachCloseInterceptors()
+            }
+        }
+    }
+
+    private func attachCloseInterceptors() {
+        for window in NSApp.windows {
+            if window.delegate is WindowCloseInterceptor { continue }
+            let key = ObjectIdentifier(window)
+            let interceptor = WindowCloseInterceptor()
+            interceptor.originalDelegate = window.delegate
+            interceptor.appDelegate = self
+            windowInterceptors[key] = interceptor
+            window.delegate = interceptor
+        }
+    }
+
+    func confirmExitIfBusy() -> Bool {
+        guard let model, model.isRunning else { return true }
+        let opLabel = model.activeOperationLabel ?? model.t("処理", "task")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = model.t("\(opLabel)を実行中です。終了しますか？", "A \(opLabel) is in progress. Quit anyway?")
+        alert.informativeText = model.t(
+            "今終了すると、実行中のPDF取得・変換・圧縮処理は中断されます（実行キューの未完了項目は次回起動時に引き継がれます）。",
+            "Quitting now will interrupt the active job (pending execution queue items will be preserved for next launch)."
+        )
+        alert.addButton(withTitle: model.t("キャンセル", "Cancel"))
+        alert.addButton(withTitle: model.t("終了する", "Quit"))
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     nonisolated func userNotificationCenter(
@@ -47,11 +121,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         completionHandler([.banner, .sound])
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if confirmedQuitOnce {
+            confirmedQuitOnce = false
+            return .terminateNow
+        }
+        return confirmExitIfBusy() ? .terminateNow : .terminateCancel
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let windowObserver {
+            NotificationCenter.default.removeObserver(windowObserver)
+            self.windowObserver = nil
+        }
         model?.cancelJob()
     }
 }
