@@ -194,50 +194,44 @@ def _infer_saved_viewport_width(captures: list) -> int:
 
 
 def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
-    """Ensure sparse interior reader pages (e.g. 1-line copyright or half-page TOC) are not narrower/shorter than cover."""
+    """Normalize all reader pages to a single uniform page size (cover/max content size)."""
     if len(pdf_blobs) < 2:
         return pdf_blobs
     try:
         import pymupdf
 
-        sample_rects: list[tuple[float, float]] = []
-        for blob in pdf_blobs[: min(8, len(pdf_blobs))]:
+        rects: list[tuple[float, float] | None] = []
+        max_w = 0.0
+        max_h = 0.0
+        for blob in pdf_blobs:
             with pymupdf.open(stream=blob, filetype="pdf") as d:
-                if len(d) > 0:
-                    r = d[0].rect
-                    if r.width >= 100 and r.height >= 100:
-                        sample_rects.append((r.width, r.height))
-        if not sample_rects:
+                if len(d) != 1:
+                    rects.append(None)
+                    continue
+                r = d[0].rect
+                rects.append((r.width, r.height))
+                if r.width >= 100 and r.height >= 100:
+                    max_w = max(max_w, r.width)
+                    max_h = max(max_h, r.height)
+        if max_w < 100 or max_h < 100:
             return pdf_blobs
 
-        cover_w, cover_h = sample_rects[0]
-        max_sample_w = max(w for w, _ in sample_rects)
-        max_sample_h = max(h for _, h in sample_rects)
-        # Guard against books that did not start on the cover (e.g. sparse first captured page)
-        if cover_w < max_sample_w * 0.75:
-            cover_w = max_sample_w
-        if cover_h < max_sample_h * 0.75:
-            cover_h = max_sample_h
-
-        normalized: list[bytes] = [pdf_blobs[0]]
-        for blob in pdf_blobs[1:]:
+        normalized: list[bytes] = []
+        for blob, sz in zip(pdf_blobs, rects):
+            if sz is None:
+                normalized.append(blob)
+                continue
+            rw, rh = sz
+            if abs(rw - max_w) <= 1.0 and abs(rh - max_h) <= 1.0:
+                normalized.append(blob)
+                continue
             with pymupdf.open(stream=blob, filetype="pdf") as src_doc:
-                if len(src_doc) != 1:
-                    normalized.append(blob)
-                    continue
-                r = src_doc[0].rect
-                if r.width >= cover_w * 0.90 and r.height >= cover_h * 0.90:
-                    normalized.append(blob)
-                    continue
-                target_w = max(cover_w, r.width)
-                target_h = max(cover_h, r.height)
                 out_doc = pymupdf.open()
-                page = out_doc.new_page(width=target_w, height=target_h)
-                # Center-align sparse content inside the cover-sized white page
-                x0 = (target_w - r.width) / 2.0
-                y0 = (target_h - r.height) / 2.0
+                page = out_doc.new_page(width=max_w, height=max_h)
+                x0 = (max_w - rw) / 2.0
+                y0 = (max_h - rh) / 2.0
                 page.show_pdf_page(
-                    pymupdf.Rect(x0, y0, x0 + r.width, y0 + r.height),
+                    pymupdf.Rect(x0, y0, x0 + rw, y0 + rh),
                     src_doc,
                     0,
                 )
