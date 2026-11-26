@@ -3793,8 +3793,14 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 4)
                 } else {
-                    ForEach(Array(pageIndices.enumerated()), id: \.element) { pos, index in
-                        let item = model.pdfQueue[index]
+                    let pageItems = pageIndices.compactMap { idx -> (Int, AppModel.PDFQueueItem)? in
+                        guard model.pdfQueue.indices.contains(idx) else { return nil }
+                        return (idx, model.pdfQueue[idx])
+                    }
+                    ForEach(Array(pageItems.enumerated()), id: \.element.1.id) { pos, pair in
+                        let index = pair.0
+                        let item = pair.1
+                        let itemID = item.id
                         let pendingOrder = item.status == .pending
                             ? model.pdfQueue.prefix(index + 1).filter { $0.status == .pending }.count
                             : nil
@@ -3849,8 +3855,12 @@ struct ContentView: View {
                             }
 
                             Picker("", selection: Binding(
-                                get: { model.pdfQueue[index].aspectPreset ?? model.readerAspectPreset },
-                                set: { model.pdfQueue[index].aspectPreset = $0 }
+                                get: { model.pdfQueue.first(where: { $0.id == itemID })?.aspectPreset ?? model.readerAspectPreset },
+                                set: { newValue in
+                                    if let idx = model.pdfQueue.firstIndex(where: { $0.id == itemID }) {
+                                        model.pdfQueue[idx].aspectPreset = newValue
+                                    }
+                                }
                             )) {
                                 ForEach(AppModel.ReaderAspectPreset.allCases) { preset in
                                     Text(preset.label(model.uiLanguage)).tag(preset)
@@ -3861,7 +3871,14 @@ struct ContentView: View {
                             .frame(width: 122)
                             .disabled(item.status == .running)
 
-                            Picker("", selection: $model.pdfQueue[index].direction) {
+                            Picker("", selection: Binding(
+                                get: { model.pdfQueue.first(where: { $0.id == itemID })?.direction ?? item.direction },
+                                set: { newValue in
+                                    if let idx = model.pdfQueue.firstIndex(where: { $0.id == itemID }) {
+                                        model.pdfQueue[idx].direction = newValue
+                                    }
+                                }
+                            )) {
                                 ForEach(AppModel.PageTurnDirection.allCases) { dir in
                                     Text(dir.label(model.uiLanguage)).tag(dir)
                                 }
