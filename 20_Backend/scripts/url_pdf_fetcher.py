@@ -1532,8 +1532,8 @@ READER_CHROME_HIDE_SCRIPT = """() => {
         '#reader-header', '#reader-footer',
         '#kr-chevron-left', '#kr-chevron-right',
         '[class*="kr-header" i]', '[class*="kr-footer" i]',
-        '[class*="scrubber" i]', '[aria-label="Reader menu"]',
-        '[aria-label="メニュー"]'
+        '[class*="scrubber" i]', '[role="slider"]', 'ion-range',
+        '[aria-label="Reader menu"]', '[aria-label="メニュー"]'
     ];
     for (const sel of selectors) {
         document.querySelectorAll(sel).forEach(el => {
@@ -1543,6 +1543,21 @@ READER_CHROME_HIDE_SCRIPT = """() => {
             }
         });
     }
+    const vh = window.innerHeight || 0;
+    document.querySelectorAll('div, section, aside').forEach(el => {
+        if (el.hasAttribute('data-ec-reader-hide')) return;
+        if (el.querySelector('img[src^="blob:"], canvas')) return;
+        const st = window.getComputedStyle(el);
+        if (st.position !== 'fixed' && st.position !== 'absolute') return;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return;
+        const isTopBar = r.top <= 24 && r.height <= 140 && r.width >= 200;
+        const isBottomBar = vh > 0 && r.bottom >= vh - 24 && r.top >= vh - 190 && r.height <= 190 && r.width >= 200;
+        if (isTopBar || isBottomBar) {
+            el.setAttribute('data-ec-reader-hide', el.style.display || '');
+            el.style.setProperty('display', 'none', 'important');
+        }
+    });
 }"""
 
 READER_CHROME_RESTORE_SCRIPT = """() => {
@@ -2574,7 +2589,7 @@ def fetch_via_browser(
                         if page_idx == 1 and created_page:
                             cover_ratio = measure_cover_aspect_ratio(reader_png)
                             if cover_ratio is not None:
-                                target_h = max(1000, min(2000, int(1040 * cover_ratio + 180)))
+                                target_h = max(1300, min(2200, int(1040 * cover_ratio + 320)))
                                 try:
                                     page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": target_h})
                                     page.wait_for_timeout(800)
