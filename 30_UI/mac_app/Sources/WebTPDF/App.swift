@@ -624,6 +624,32 @@ final class AppModel: ObservableObject {
         }
     }
 
+    enum ReaderCaptureQuality: String, CaseIterable, Identifiable, Codable, Hashable {
+        case high = "high"
+        case standard = "standard"
+
+        var id: String { rawValue }
+
+        func label(_ lang: UILanguage) -> String {
+            switch self {
+            case .high: return lang == .ja ? "高画質 (2x・楽譜/文字くっきり)" : "High (2x Retina)"
+            case .standard: return lang == .ja ? "標準 (1x・軽量)" : "Standard (1x)"
+            }
+        }
+    }
+
+    @Published var readerCaptureQuality: ReaderCaptureQuality = {
+        if let raw = UserDefaults.standard.string(forKey: "readerCaptureQualityRaw"),
+           let q = ReaderCaptureQuality(rawValue: raw) {
+            return q
+        }
+        return .high
+    }() {
+        didSet {
+            UserDefaults.standard.set(readerCaptureQuality.rawValue, forKey: "readerCaptureQualityRaw")
+        }
+    }
+
     @Published var maxPagesSetting = "1000"
     @Published var readerAspectPreset: ReaderAspectPreset = {
         if let raw = UserDefaults.standard.string(forKey: "readerAspectPresetV2"),
@@ -2840,6 +2866,7 @@ final class AppModel: ObservableObject {
                 "--output", outputURL.path,
                 "--direction", resolvedDirection.rawValue,
                 "--aspect-preset", (aspectPreset ?? readerAspectPreset).rawValue,
+                "--quality", readerCaptureQuality.rawValue,
                 "--max-pages", String(max(1, maxPages)),
                 "--result-json", resultURL.path,
             ]
@@ -3693,6 +3720,21 @@ struct ContentView: View {
                             Text(model.t("※文字サイズ変更できる本のみ適用／漫画・楽譜など固定形は元の比率を維持", "* Applies to reflowable books only; fixed-layout books keep original shape"))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+
+                        HStack(spacing: 10) {
+                            Text(model.t("画質", "Quality"))
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            Picker(model.t("画質", "Quality"), selection: $model.readerCaptureQuality) {
+                                ForEach(AppModel.ReaderCaptureQuality.allCases) { q in
+                                    Text(q.label(model.uiLanguage)).tag(q)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(maxWidth: 380)
                             Spacer()
                         }
 

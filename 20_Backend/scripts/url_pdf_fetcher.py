@@ -2252,10 +2252,35 @@ def _trim_outer_white_margin(rgb: Image.Image, pad_ratio: float = 0.015) -> Imag
     return rgb
 
 
+def _apply_reader_viewport(page, width: int, height: int, scale_factor: int = 1, cdp_session=None) -> None:
+    """Set viewport size and optional 2x Retina deviceScaleFactor via CDP Emulation."""
+    page.set_viewport_size({"width": width, "height": height})
+    if scale_factor > 1:
+        try:
+            sess = cdp_session or page.context.new_cdp_session(page)
+            sess.send(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": scale_factor,
+                    "mobile": False,
+                },
+            )
+            if cdp_session is None:
+                try:
+                    sess.detach()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
 def capture_reader_page_as_pdf_bytes(
     page,
     pad_ratio: float = 0.0,
     cdp_session=None,
+    scale_factor: int = 1,
 ) -> tuple[bytes, bytes] | None:
     """Capture the rendered Reader page via clipped screenshot with uniform clean margins."""
     _hide_reader_chrome(page)
@@ -2270,14 +2295,15 @@ def capture_reader_page_as_pdf_bytes(
     buf = io.BytesIO()
     with Image.open(io.BytesIO(png_bytes)) as img:
         rgb = img.convert("RGB")
+        dpi = 72.0 * max(1, scale_factor)
         if pad_ratio > 0:
             pad_x = max(8, int(round(rgb.width * pad_ratio)))
             pad_y = max(10, int(round(rgb.height * pad_ratio)))
             canvas = Image.new("RGB", (rgb.width + 2 * pad_x, rgb.height + 2 * pad_y), (255, 255, 255))
             canvas.paste(rgb, (pad_x, pad_y))
-            canvas.save(buf, "PDF")
+            canvas.save(buf, "PDF", resolution=dpi)
         else:
-            rgb.save(buf, "PDF")
+            rgb.save(buf, "PDF", resolution=dpi)
     return buf.getvalue(), png_bytes
 
 
@@ -2854,8 +2880,10 @@ def fetch_via_browser(
     reader_checkpoint: ReaderCheckpoint | None = None,
     result_details: dict[str, int] | None = None,
     aspect_preset: str = "auto",
+    quality: str = "high",
 ) -> tuple[int, Path]:
     """Use CDP (logged-in Chrome) or headless Chromium to paginate with ArrowRight/ArrowLeft and capture PDFs."""
+    scale_factor = 2 if quality == "high" else 1
     turn_key = "ArrowLeft" if direction == "left" else "ArrowRight"
     saved_captures = reader_checkpoint.load() if reader_checkpoint and reader_checkpoint.path.exists() else []
     if saved_captures and reader_at_last_page(saved_captures[-1]):
@@ -2951,7 +2979,7 @@ def fetch_via_browser(
                 if saved_pages[-1].total is not None:
                     log(f"READER_PROGRESS={len(saved_pages)}/{saved_pages[-1].total}")
                 if reader_mode and saved_pages[-1].viewport_height is not None:
-                    page.set_viewport_size({"width": _infer_saved_viewport_width(saved_pages), "height": saved_pages[-1].viewport_height})
+                    _apply_reader_viewport(page, _infer_saved_viewport_width(saved_pages), saved_pages[-1].viewport_height, scale_factor=scale_factor, cdp_session=cdp_session)
                 elif not reader_mode and reader_checkpoint is not None:
                     resume_url, restored_skipped_steps = reader_checkpoint.load_resume_state()
                     if resume_url and resume_url != page.url:
@@ -2966,7 +2994,7 @@ def fetch_via_browser(
                 if created_page:
                     try:
                         init_w, init_h = READER_ASPECT_PRESETS.get(aspect_preset, (READER_VIEWPORT_WIDTH, READER_DEFAULT_HEIGHT))
-                        page.set_viewport_size({"width": init_w, "height": init_h})
+                        _apply_reader_viewport(page, init_w, init_h, scale_factor=scale_factor, cdp_session=cdp_session)
                         page.wait_for_timeout(800)
                     except Exception:
                         pass
@@ -3302,13 +3330,13 @@ def fetch_via_browser(
                         _wait_for_reader_reader(page, timeout_ms=8000)
                     if is_reader_oops(page):
                         continue
-                    k_res = capture_reader_page_as_pdf_bytes(page, cdp_session=cdp_session)
+                    k_res = capture_reader_page_as_pdf_bytes(page, cdp_session=cdp_session, scale_factor=scale_factor)
                     if k_res is not None:
                         page_pdf_bytes, reader_png = k_res
                         if page_idx == 1 and created_page:
                             cover_ratio, ratio_source = measure_cover_aspect_ratio_from_page(page, reader_png)
                             if cover_ratio is not None:
-                                log(f"[Reader] Cover aspect ratio: {cover_ratio:.3f} ({ratio_source}), preset={aspect_preset}")
+                                log(f"[Reader] Cover aspect ratio: {cover_ratio:.3f} ({ratio_source}), preset={aspect_preset}, quality={quality} ({scale_factor}x)")
                                 if cover_ratio < 1.15:
                                     # Keep natural landscape / spread aspect ratio for fixed-shape books (scores, spreads)
                                     target_w = READER_LANDSCAPE_VIEWPORT_WIDTH
@@ -3320,9 +3348,9 @@ def fetch_via_browser(
                                     target_w = READER_VIEWPORT_WIDTH
                                     target_h = max(1000, min(1560, int(round(target_w * cover_ratio))))
                                 try:
-                                    page.set_viewport_size({"width": target_w, "height": target_h})
+                                    _apply_reader_viewport(page, target_w, target_h, scale_factor=scale_factor, cdp_session=cdp_session)
                                     page.wait_for_timeout(800)
-                                    k_res2 = capture_reader_page_as_pdf_bytes(page, cdp_session=cdp_session)
+                                    k_res2 = capture_reader_page_as_pdf_bytes(page, cdp_session=cdp_session, scale_factor=scale_factor)
                                     if k_res2 is not None:
                                         page_pdf_bytes, reader_png = k_res2
                                 except Exception:
@@ -3663,6 +3691,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds (default: 30)")
     parser.add_argument("--direction", choices=["right", "left"], default="right", help="Page-turn key direction (default: right)")
     parser.add_argument("--aspect-preset", choices=["auto", "ipad", "iphone", "pc"], default="auto", help="Preferred viewport aspect ratio for reflowable books (default: auto)")
+    parser.add_argument("--quality", choices=["standard", "high"], default="high", help="Capture resolution: standard (1x) or high (2x Retina) (default: high)")
     parser.add_argument("--no-browser", action="store_true", help="Disable Playwright browser fallback")
     parser.add_argument("--auto-name", action="store_true", help="Auto-name output as <Title>_<YYYYMMDD>.pdf when available")
     parser.add_argument("--reader-checkpoint", type=Path, help="Save and resume captured Reader pages")
@@ -3699,6 +3728,7 @@ def main() -> int:
                 direction=args.direction, auto_name=args.auto_name, reader_checkpoint=checkpoint,
                 result_details=result_details,
                 aspect_preset=args.aspect_preset,
+                quality=args.quality,
             )
         elif args.auto_name and not args.no_browser:
             # Allow fetch_and_merge / fetch_via_browser to resolve final output path
