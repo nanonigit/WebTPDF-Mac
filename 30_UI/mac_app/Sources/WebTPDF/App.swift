@@ -204,6 +204,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    enum DashboardSectionID: String, Codable, CaseIterable, Identifiable {
+        case activeJob
+        case history
+        case runtime
+        case log
+
+        var id: String { rawValue }
+
+        func title(_ lang: UILanguage) -> String {
+            switch self {
+            case .activeJob: return lang == .ja ? "現在の作業状況・キュー進捗" : "Active Job & Queue Progress"
+            case .history: return lang == .ja ? "取得履歴" : "Fetch History"
+            case .runtime: return lang == .ja ? "実行環境の準備状況" : "Runtime Environment"
+            case .log: return lang == .ja ? "ログ" : "Log"
+            }
+        }
+    }
+
     enum QueueSortOrder: String, CaseIterable, Identifiable {
         case newestFirst
         case oldestFirst
@@ -465,6 +483,40 @@ final class AppModel: ObservableObject {
     @Published var queueSortOrder: QueueSortOrder = .newestFirst
     @Published var historySortOrder: QueueSortOrder = .newestFirst
     @Published var historyErrorsOnly: Bool = false
+    @Published var dashboardSectionOrder: [DashboardSectionID] = {
+        let fallback = DashboardSectionID.allCases
+        guard let data = UserDefaults.standard.data(forKey: "dashboardSectionOrderJSON"),
+              let decoded = try? JSONDecoder().decode([DashboardSectionID].self, from: data)
+        else {
+            return fallback
+        }
+        var seen = Set<DashboardSectionID>()
+        var result = decoded.filter { seen.insert($0).inserted }
+        for missing in fallback where !seen.contains(missing) {
+            result.append(missing)
+        }
+        return result
+    }() {
+        didSet {
+            if let encoded = try? JSONEncoder().encode(dashboardSectionOrder) {
+                UserDefaults.standard.set(encoded, forKey: "dashboardSectionOrderJSON")
+            }
+        }
+    }
+    @Published var collapsedDashboardSections: Set<DashboardSectionID> = {
+        guard let data = UserDefaults.standard.data(forKey: "collapsedDashboardSectionsJSON"),
+              let decoded = try? JSONDecoder().decode([DashboardSectionID].self, from: data)
+        else {
+            return []
+        }
+        return Set(decoded)
+    }() {
+        didSet {
+            if let encoded = try? JSONEncoder().encode(Array(collapsedDashboardSections)) {
+                UserDefaults.standard.set(encoded, forKey: "collapsedDashboardSectionsJSON")
+            }
+        }
+    }
     @Published private(set) var activeFetchBookTitle: String?
     @Published private(set) var activeFetchCapturedPages: Int?
     @Published private(set) var activeFetchExpectedPages: Int?
@@ -1130,6 +1182,25 @@ final class AppModel: ObservableObject {
         if queuePageIndex >= totalPages {
             queuePageIndex = max(0, totalPages - 1)
         }
+    }
+
+    func isDashboardSectionCollapsed(_ id: DashboardSectionID) -> Bool {
+        collapsedDashboardSections.contains(id)
+    }
+
+    func toggleDashboardSection(_ id: DashboardSectionID) {
+        if collapsedDashboardSections.contains(id) {
+            collapsedDashboardSections.remove(id)
+        } else {
+            collapsedDashboardSections.insert(id)
+        }
+    }
+
+    func moveDashboardSection(_ id: DashboardSectionID, delta: Int) {
+        guard let idx = dashboardSectionOrder.firstIndex(of: id) else { return }
+        let target = idx + delta
+        guard target >= 0 && target < dashboardSectionOrder.count else { return }
+        dashboardSectionOrder.swapAt(idx, target)
     }
 
     func sortedFilteredHistory() -> [URLFetchHistoryItem] {
@@ -4315,15 +4386,74 @@ struct ContentView: View {
                     updateAppButton
                 }
 
-                dashboardRuntimeBox
-
-                dashboardActiveJobSection
-
-                fetchHistorySection
-
-                logBox(minHeight: 160)
+                ForEach(model.dashboardSectionOrder) { sectionID in
+                    dashboardCollapsibleSection(sectionID)
+                }
             }
             .padding(28)
+        }
+    }
+
+    @ViewBuilder
+    private func dashboardCollapsibleSection(_ sectionID: AppModel.DashboardSectionID) -> some View {
+        let collapsed = model.isDashboardSectionCollapsed(sectionID)
+        let idx = model.dashboardSectionOrder.firstIndex(of: sectionID) ?? 0
+        let isFirst = idx == 0
+        let isLast = idx >= model.dashboardSectionOrder.count - 1
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    model.toggleDashboardSection(sectionID)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 12)
+                        Text(sectionID.title(model.uiLanguage))
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+                .buttonStyle(.plain)
+                .help(model.t("クリックして折りたたみ / 展開", "Click to collapse / expand"))
+
+                Spacer()
+
+                Button {
+                    model.moveDashboardSection(sectionID, delta: -1)
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .disabled(isFirst)
+                .help(model.t("上へ移動", "Move up"))
+
+                Button {
+                    model.moveDashboardSection(sectionID, delta: 1)
+                } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .disabled(isLast)
+                .help(model.t("下へ移動", "Move down"))
+            }
+            .padding(.horizontal, 4)
+
+            if !collapsed {
+                switch sectionID {
+                case .activeJob:
+                    dashboardActiveJobSection
+                case .history:
+                    fetchHistorySection
+                case .runtime:
+                    dashboardRuntimeBox
+                case .log:
+                    logBox(minHeight: 160)
+                }
+            }
         }
     }
 
