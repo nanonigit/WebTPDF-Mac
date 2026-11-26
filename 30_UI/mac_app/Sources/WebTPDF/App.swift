@@ -2843,6 +2843,10 @@ final class AppModel: ObservableObject {
         }.flatMap { item in
             guard let path = item.outputPath else { return nil }
             let url = URL(fileURLWithPath: path)
+            let name = url.lastPathComponent.lowercased()
+            if name.contains("_read.amazon.") || name.hasPrefix("202") && name.contains("_") && name.hasSuffix(".pdf") {
+                return nil
+            }
             return url.deletingLastPathComponent().standardizedFileURL == fetchedPDFRoot.standardizedFileURL ? url : nil
         }
         let outputURL = existingOutputURL ?? fetchedPDFRoot.appendingPathComponent("\(makeJobID())_\(hostPart).pdf")

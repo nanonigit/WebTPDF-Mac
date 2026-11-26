@@ -1133,14 +1133,21 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
                     page.keyboard.press("Escape")
                 except Exception:
                     pass
-    # Even after TOC/Location 1 jump, always press Escape and step backward until we truly hit the cover
-    # (TOC often lands on page 2-4 like "Characters" or "Intro", which can still show 0% or Location 2).
+    # Even after TOC/Location 1 jump, always close any toolbar/menu and step backward until we truly hit the cover
+    # (TOC often lands on page 2-4 like "Characters" or "Intro", which can still show 0%-1% or Location 2-3).
     try:
         page.keyboard.press("Escape")
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(300)
+        if _is_reader_toolbar_in_viewport(page):
+            vp = page.viewport_size
+            cx = (vp["width"] / 2.0) if vp else 430.0
+            cy = (vp["height"] / 2.0) if vp else 600.0
+            page.mouse.click(cx, cy)
+            page.wait_for_timeout(350)
     except Exception:
         pass
     reverse_key = "ArrowRight" if turn_key == "ArrowLeft" else "ArrowLeft"
+    reverse_chevron = "#kr-chevron-right, [data-testid='chevron-right']" if reverse_key == "ArrowRight" else "#kr-chevron-left, [data-testid='chevron-left']"
     log(f"[Reader] Stepping back to true cover (page 1) via {reverse_key}...")
     unchanged = 0
     for step in range(max_steps):
@@ -1153,10 +1160,10 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
             if frame is not None:
                 prev_frame_hash = hashlib.sha256(frame).hexdigest()
         page.keyboard.press(reverse_key)
-        page.wait_for_timeout(180)
+        page.wait_for_timeout(350)
         changed = False
         if prev_src:
-            changed = wait_for_reader_turn(page, prev_src, timeout_ms=1000)
+            changed = wait_for_reader_turn(page, prev_src, timeout_ms=1200)
         cur_pos = get_reader_position(page)
         if cur_pos is not None and prev_pos is not None and cur_pos != prev_pos:
             changed = True
@@ -1164,6 +1171,21 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
             frame2 = _capture_clean_reader_frame(page, timeout_ms=5000)
             if frame2 is not None and hashlib.sha256(frame2).hexdigest() != prev_frame_hash:
                 changed = True
+        # If keyboard didn't move and we know we're still past page 1, try clicking the reverse chevron directly.
+        if not changed and (cur_pos is None or cur_pos[1] > 1):
+            try:
+                chev = page.locator(reverse_chevron).first
+                if chev.count() > 0:
+                    chev.click(force=True, timeout=1500)
+                    page.wait_for_timeout(450)
+                    cur_pos2 = get_reader_position(page)
+                    if cur_pos2 is not None and prev_pos is not None and cur_pos2 != prev_pos:
+                        changed = True
+                        cur_pos = cur_pos2
+                    elif prev_src and (page.evaluate(READER_PAGE_SOURCE) or "") != prev_src:
+                        changed = True
+            except Exception:
+                pass
         if changed:
             unchanged = 0
         else:
