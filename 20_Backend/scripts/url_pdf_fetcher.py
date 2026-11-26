@@ -746,12 +746,18 @@ def dismiss_reader_dialogs(page) -> bool:
 
 
 def is_reader_not_at_start(page) -> bool:
-    """Return True if paginated ebook reader is currently past page 1 / > 0%."""
+    """Return True if paginated ebook reader is currently past page/location 1 or > 0%."""
     try:
-        body_text = page.inner_text("body") or ""
+        marker = get_reader_position(page)
+        if marker is not None and marker[1] > 1:
+            return True
         cur = get_reader_page_number(page)
         if cur is not None and cur > 1:
             return True
+        pct = get_reader_progress_percent(page)
+        if pct is not None and pct > 0:
+            return True
+        body_text = page.inner_text("body", timeout=2000) or ""
         m_pct = re.search(r"[●•]\s*([1-9]\d*)%", body_text)
         if m_pct:
             return True
