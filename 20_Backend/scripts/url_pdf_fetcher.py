@@ -3539,14 +3539,51 @@ def fetch_via_browser(
                                 break
                             current_pdf_hash = prev_pdf_hash
                     if reader_mode:
-                        for pdf_retry in range(2):
-                            log(f"[Reader] Page {page_idx} PDF content unchanged; retrying turn ({pdf_retry + 1}/2)...")
+                        next_chevron = "#kr-chevron-left, [data-testid='chevron-left']" if turn_key == "ArrowLeft" else "#kr-chevron-right, [data-testid='chevron-right']"
+                        for pdf_retry in range(3):
+                            log(f"[Reader] Page {page_idx} PDF content unchanged; retrying turn ({pdf_retry + 1}/3)...")
+                            dismiss_reader_dialogs(page)
                             source = page.evaluate(READER_PAGE_SOURCE)
-                            page.keyboard.press(turn_key)
-                            if source:
-                                wait_for_reader_turn(page, source)
+                            if pdf_retry == 0:
+                                # 1st retry: press turn_key, and if unchanged try clicking the next chevron directly.
+                                page.keyboard.press(turn_key)
+                                turned = wait_for_reader_turn(page, source) if source else False
+                                if not turned:
+                                    try:
+                                        chev = page.locator(next_chevron).first
+                                        if chev.count() > 0:
+                                            chev.click(force=True, timeout=1500)
+                                            page.wait_for_timeout(600)
+                                    except Exception:
+                                        pass
+                            elif pdf_retry == 1 and last_reader_page is not None and expected_total_pages is not None and last_reader_page < expected_total_pages:
+                                # 2nd retry: jump directly to next page/location number via Go to Page / Location.
+                                log(f"[Reader] Turn stuck at {last_reader_page}/{expected_total_pages}; trying direct jump to {last_reader_page + 1}...")
+                                try:
+                                    _reveal_reader_toolbar(page)
+                                    seek_reader_position(page, last_reader_page + 1, target_is_printed_page=True, expected_total_pages=expected_total_pages)
+                                    page.wait_for_timeout(600)
+                                except Exception:
+                                    try:
+                                        page.keyboard.press("Escape")
+                                    except Exception:
+                                        pass
                             else:
-                                page.wait_for_timeout(2000)
+                                # 3rd retry: try TOC next chapter if still before the end, else click chevron + key.
+                                if expected_total_pages is not None and last_reader_page is not None and last_reader_page < expected_total_pages:
+                                    log("[Reader] Direct jump did not advance; trying next chapter via Table of Contents...")
+                                    try:
+                                        _reveal_reader_toolbar(page)
+                                        jump_to_reader_chapter(page, 1)
+                                        page.wait_for_timeout(600)
+                                    except Exception:
+                                        try:
+                                            page.keyboard.press("Escape")
+                                        except Exception:
+                                            pass
+                                else:
+                                    page.keyboard.press(turn_key)
+                                    page.wait_for_timeout(1200)
                             if is_reader_oops(page):
                                 break
                             k_res_retry = capture_reader_page_as_pdf_bytes(page, scale_factor=scale_factor)
