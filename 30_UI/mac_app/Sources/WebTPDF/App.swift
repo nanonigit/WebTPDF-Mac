@@ -269,6 +269,7 @@ final class AppModel: ObservableObject {
         var outputURL: URL?
         var errorMessage: String?
         var bookTitle: String?
+        var aspectPreset: ReaderAspectPreset? = nil
     }
 
     struct URLFetchHistoryItem: Identifiable, Codable, Hashable {
@@ -605,7 +606,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var ollamaStatusMessage = "未確認"
     @Published private(set) var isTestingOllama = false
     @Published private(set) var ollamaTestOutput = ""
-    enum ReaderAspectPreset: String, CaseIterable, Identifiable {
+    enum ReaderAspectPreset: String, CaseIterable, Identifiable, Codable, Hashable {
         case ipad = "ipad"
         case iphone = "iphone"
         case pc = "pc"
@@ -616,7 +617,7 @@ final class AppModel: ObservableObject {
         func label(_ lang: UILanguage) -> String {
             switch self {
             case .ipad: return lang == .ja ? "iPad用 (3:4)" : "iPad (3:4)"
-            case .iphone: return lang == .ja ? "iPhone用" : "iPhone"
+            case .iphone: return lang == .ja ? "iPhone用 (9:16)" : "iPhone (9:16)"
             case .pc: return lang == .ja ? "PC用 (4:3)" : "PC (4:3)"
             case .auto: return lang == .ja ? "自動" : "Auto"
             }
@@ -1472,13 +1473,14 @@ final class AppModel: ObservableObject {
         return progress.unchecked
     }
 
-    func redownloadFromHistory(_ item: URLFetchHistoryItem) {
+    func redownloadFromHistory(_ item: URLFetchHistoryItem, aspectPreset: ReaderAspectPreset? = nil) {
         if let running = pdfQueue.first(where: {
             $0.url == item.url && $0.direction == item.direction && $0.status == .running
         }) {
             _ = running
             return
         }
+        let chosenPreset = aspectPreset ?? readerAspectPreset
         if let hIdx = urlFetchHistory.firstIndex(where: { $0.id == item.id }) {
             let existing = urlFetchHistory.remove(at: hIdx)
             let bumped = URLFetchHistoryItem(
@@ -1503,10 +1505,11 @@ final class AppModel: ObservableObject {
         if let existingIdx = pdfQueue.firstIndex(where: {
             $0.url == item.url && $0.direction == item.direction && $0.status == .pending
         }) {
-            let existing = pdfQueue.remove(at: existingIdx)
+            var existing = pdfQueue.remove(at: existingIdx)
+            existing.aspectPreset = chosenPreset
             pdfQueue.insert(existing, at: 0)
         } else {
-            pdfQueue.insert(PDFQueueItem(url: item.url, direction: item.direction, bookTitle: item.bookTitle), at: 0)
+            pdfQueue.insert(PDFQueueItem(url: item.url, direction: item.direction, bookTitle: item.bookTitle, aspectPreset: chosenPreset), at: 0)
         }
         queuePageIndex = 0
         isQueueAutoPaused = false
@@ -1629,7 +1632,7 @@ final class AppModel: ObservableObject {
 
                 let outcome: Result<(URL, URLFetchResult), Error>
                 do {
-                    outcome = .success(try await self.performURLFetch(urlString: item.url, direction: item.direction))
+                    outcome = .success(try await self.performURLFetch(urlString: item.url, direction: item.direction, aspectPreset: item.aspectPreset))
                 } catch {
                     outcome = .failure(error)
                 }
@@ -2785,7 +2788,7 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    private func performURLFetch(urlString: String, direction: PageTurnDirection? = nil) async throws -> (URL, URLFetchResult) {
+    private func performURLFetch(urlString: String, direction: PageTurnDirection? = nil, aspectPreset: ReaderAspectPreset? = nil) async throws -> (URL, URLFetchResult) {
         guard let parsed = URL(string: urlString),
               let scheme = parsed.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
@@ -2836,7 +2839,7 @@ final class AppModel: ObservableObject {
                 "--url", urlString,
                 "--output", outputURL.path,
                 "--direction", resolvedDirection.rawValue,
-                "--aspect-preset", readerAspectPreset.rawValue,
+                "--aspect-preset", (aspectPreset ?? readerAspectPreset).rawValue,
                 "--max-pages", String(max(1, maxPages)),
                 "--result-json", resultURL.path,
             ]
@@ -3686,7 +3689,7 @@ struct ContentView: View {
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
-                            .frame(maxWidth: 340)
+                            .frame(maxWidth: 420)
                             Text(model.t("※文字サイズ変更できる本のみ適用／漫画・楽譜など固定形は元の比率を維持", "* Applies to reflowable books only; fixed-layout books keep original shape"))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -3844,6 +3847,19 @@ struct ContentView: View {
                                     .foregroundStyle(.orange)
                                     .help(histName.isEmpty ? hist.url : histName)
                             }
+
+                            Picker("", selection: Binding(
+                                get: { model.pdfQueue[index].aspectPreset ?? model.readerAspectPreset },
+                                set: { model.pdfQueue[index].aspectPreset = $0 }
+                            )) {
+                                ForEach(AppModel.ReaderAspectPreset.allCases) { preset in
+                                    Text(preset.label(model.uiLanguage)).tag(preset)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(width: 122)
+                            .disabled(item.status == .running)
 
                             Picker("", selection: $model.pdfQueue[index].direction) {
                                 ForEach(AppModel.PageTurnDirection.allCases) { dir in
@@ -4230,15 +4246,24 @@ struct ContentView: View {
                                 .tint(.red)
                                 .help(model.t("キューに登録された再ダウンロード予約を取り消します", "Remove this queued re-download from the queue"))
                             } else {
-                                let retryButton = Button(model.t("再ダウンロード", "Re-download")) {
+                                let retryMenu = Menu {
+                                    ForEach(AppModel.ReaderAspectPreset.allCases) { preset in
+                                        Button(model.t("\(preset.label(model.uiLanguage))で再DL", "Re-download (\(preset.label(model.uiLanguage)))")) {
+                                            model.redownloadFromHistory(entry, aspectPreset: preset)
+                                        }
+                                    }
+                                } label: {
+                                    Text(model.t("再ダウンロード", "Re-download"))
+                                } primaryAction: {
                                     model.redownloadFromHistory(entry)
                                 }
+                                .fixedSize()
                                 if entry.hasWarning {
-                                    retryButton
+                                    retryMenu
                                         .buttonStyle(.borderedProminent)
                                         .tint(.orange)
                                 } else {
-                                    retryButton.buttonStyle(.bordered)
+                                    retryMenu.buttonStyle(.bordered)
                                 }
                             }
 
