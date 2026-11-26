@@ -925,8 +925,22 @@ def jump_to_reader_toc_start(page) -> bool:
             pass
 
 
+def _reveal_reader_toolbar(page) -> None:
+    """Click the center of the reader viewport to reveal hidden Kindle top/bottom toolbars and footer."""
+    try:
+        vp = page.viewport_size
+        cx = (vp["width"] / 2.0) if vp else 430.0
+        cy = (vp["height"] / 2.0) if vp else 600.0
+        page.mouse.click(cx, cy)
+        page.wait_for_timeout(450)
+    except Exception:
+        pass
+
+
 def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
     """Jump to Location/Page 1 or TOC Cover when available, then step back any remaining pages to cover."""
+    if get_reader_position(page) is None:
+        _reveal_reader_toolbar(page)
     jumped_by_nav = False
     for prefer_page in (False, True):
         try:
@@ -959,22 +973,33 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
     unchanged = 0
     for step in range(max_steps):
         dismiss_reader_dialogs(page)
-        prev_src = page.evaluate("() => document.querySelector('img[src^=\"blob:\"]')?.src || ''")
+        prev_pos = get_reader_position(page)
+        if prev_pos is not None and prev_pos[1] <= 1:
+            log(f"[Reader] Reached first page ({prev_pos[0]} {prev_pos[1]}) after {step} backward step(s).")
+            return
+        prev_src = page.evaluate(READER_PAGE_SOURCE)
+        prev_frame_hash = None
+        if not prev_src:
+            frame = _capture_clean_reader_frame(page, timeout_ms=5000)
+            if frame is not None:
+                prev_frame_hash = hashlib.sha256(frame).hexdigest()
         page.keyboard.press(reverse_key)
-        page.wait_for_timeout(160)
+        page.wait_for_timeout(180)
         changed = False
-        try:
-            page.wait_for_function(
-                "(prev) => { const img = document.querySelector('img[src^=\"blob:\"]'); return img && img.complete && img.src !== prev; }",
-                arg=prev_src,
-                timeout=800,
-            )
+        if prev_src:
+            changed = wait_for_reader_turn(page, prev_src, timeout_ms=1000)
+        cur_pos = get_reader_position(page)
+        if cur_pos is not None and prev_pos is not None and cur_pos != prev_pos:
             changed = True
-        except Exception:
-            cur_src = page.evaluate("() => document.querySelector('img[src^=\"blob:\"]')?.src || ''")
-            changed = bool(cur_src and cur_src != prev_src)
+        if not changed and prev_frame_hash is not None:
+            frame2 = _capture_clean_reader_frame(page, timeout_ms=5000)
+            if frame2 is not None and hashlib.sha256(frame2).hexdigest() != prev_frame_hash:
+                changed = True
         if changed:
             unchanged = 0
+            if cur_pos is not None and cur_pos[1] <= 1:
+                log(f"[Reader] Reached first page ({cur_pos[0]} {cur_pos[1]}) after {step + 1} backward step(s).")
+                return
         else:
             unchanged += 1
             page.wait_for_timeout(300)
@@ -2858,12 +2883,28 @@ def fetch_via_browser(
                         dismiss_reader_dialogs(page)
                         if is_reader_oops(page):
                             continue
-                        initial_pos = get_reader_position(page)
-                        if is_reader_not_at_start(page) or initial_pos is None or initial_pos[1] > 1:
+                        for rewind_try in range(2):
+                            initial_pos = get_reader_position(page)
+                            initial_pct = get_reader_progress_percent(page)
+                            if not is_reader_not_at_start(page) and initial_pos is not None and initial_pos[1] <= 1:
+                                break
                             rewind_reader_to_start(page, turn_key)
                             dismiss_reader_dialogs(page)
+                            if is_reader_oops(page):
+                                break
+                            after_pos = get_reader_position(page)
+                            after_pct = get_reader_progress_percent(page)
+                            if (after_pos is None or after_pos[1] <= 3) and (after_pct is None or after_pct < 15):
+                                break
+                            log(f"[Reader] Still not at first page after rewind {rewind_try + 1}/2 (pos={after_pos}, pct={after_pct}).")
                         if is_reader_oops(page):
                             continue
+                        verify_pos = get_reader_position(page)
+                        verify_pct = get_reader_progress_percent(page)
+                        if (verify_pos is not None and verify_pos[1] > 5) or (verify_pct is not None and verify_pct >= 20):
+                            raise RuntimeError(
+                                f"最初のページ（1ページ目）に戻れませんでした（現在位置: {verify_pos[1] if verify_pos else '?'} / {verify_pct if verify_pct is not None else '?'}%）。再ダウンロードしてください。"
+                            )
                 else:
                     wait_for_page_ready(page, timeout_ms=15000)
                     for _ in range(3):
