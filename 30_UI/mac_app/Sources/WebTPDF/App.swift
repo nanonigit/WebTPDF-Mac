@@ -222,6 +222,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    enum URLToPDFSectionID: String, Codable, CaseIterable, Identifiable {
+        case captureSettings
+        case queue
+        case history
+        case log
+
+        var id: String { rawValue }
+
+        func title(_ lang: UILanguage) -> String {
+            switch self {
+            case .captureSettings: return lang == .ja ? "URL取得設定" : "Capture Settings"
+            case .queue: return lang == .ja ? "実行キュー" : "Execution Queue"
+            case .history: return lang == .ja ? "取得履歴" : "Fetch History"
+            case .log: return lang == .ja ? "ログ" : "Log"
+            }
+        }
+    }
+
     enum QueueSortOrder: String, CaseIterable, Identifiable {
         case oldestFirst
         case newestFirst
@@ -517,6 +535,41 @@ final class AppModel: ObservableObject {
         }
     }
     @Published var historyErrorsOnly: Bool = false
+    @Published var urlToPDFSectionOrder: [URLToPDFSectionID] = {
+        let fallback = URLToPDFSectionID.allCases
+        guard let data = UserDefaults.standard.data(forKey: "urlToPDFSectionOrderJSON"),
+              let decoded = try? JSONDecoder().decode([URLToPDFSectionID].self, from: data)
+        else {
+            return fallback
+        }
+        var seen = Set<URLToPDFSectionID>()
+        var result = decoded.filter { seen.insert($0).inserted }
+        for id in fallback where !seen.contains(id) {
+            result.append(id)
+        }
+        return result
+    }() {
+        didSet {
+            if let data = try? JSONEncoder().encode(urlToPDFSectionOrder) {
+                UserDefaults.standard.set(data, forKey: "urlToPDFSectionOrderJSON")
+            }
+        }
+    }
+    @Published var collapsedURLToPDFSections: Set<URLToPDFSectionID> = {
+        guard let data = UserDefaults.standard.data(forKey: "collapsedURLToPDFSectionsJSON"),
+              let decoded = try? JSONDecoder().decode([URLToPDFSectionID].self, from: data)
+        else {
+            return []
+        }
+        return Set(decoded)
+    }() {
+        didSet {
+            if let data = try? JSONEncoder().encode(Array(collapsedURLToPDFSections)) {
+                UserDefaults.standard.set(data, forKey: "collapsedURLToPDFSectionsJSON")
+            }
+        }
+    }
+
     @Published var dashboardSectionOrder: [DashboardSectionID] = {
         let fallback = DashboardSectionID.allCases
         guard let data = UserDefaults.standard.data(forKey: "dashboardSectionOrderJSON"),
@@ -1293,6 +1346,25 @@ final class AppModel: ObservableObject {
         let target = idx + delta
         guard target >= 0 && target < dashboardSectionOrder.count else { return }
         dashboardSectionOrder.swapAt(idx, target)
+    }
+
+    func isURLToPDFSectionCollapsed(_ id: URLToPDFSectionID) -> Bool {
+        collapsedURLToPDFSections.contains(id)
+    }
+
+    func toggleURLToPDFSection(_ id: URLToPDFSectionID) {
+        if collapsedURLToPDFSections.contains(id) {
+            collapsedURLToPDFSections.remove(id)
+        } else {
+            collapsedURLToPDFSections.insert(id)
+        }
+    }
+
+    func moveURLToPDFSection(_ id: URLToPDFSectionID, delta: Int) {
+        guard let idx = urlToPDFSectionOrder.firstIndex(of: id) else { return }
+        let target = idx + delta
+        guard target >= 0 && target < urlToPDFSectionOrder.count else { return }
+        urlToPDFSectionOrder.swapAt(idx, target)
     }
 
     func sortedFilteredHistory() -> [URLFetchHistoryItem] {
@@ -3594,8 +3666,91 @@ struct ContentView: View {
 
     private var urlToPDFView: some View {
         VisibleScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                GroupBox(model.t("URL取得設定", "Capture Settings")) {
+            VStack(alignment: .leading, spacing: 20) {
+                ForEach(model.urlToPDFSectionOrder) { sectionID in
+                    urlToPDFCollapsibleSection(sectionID)
+                }
+            }
+            .padding(28)
+        }
+    }
+
+    @ViewBuilder
+    private func urlToPDFCollapsibleSection(_ sectionID: AppModel.URLToPDFSectionID) -> some View {
+        let collapsed = model.isURLToPDFSectionCollapsed(sectionID)
+        let idx = model.urlToPDFSectionOrder.firstIndex(of: sectionID) ?? 0
+        let isFirst = idx == 0
+        let isLast = idx >= model.urlToPDFSectionOrder.count - 1
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    model.toggleURLToPDFSection(sectionID)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 12)
+                        Text(urlToPDFSectionTitle(sectionID))
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+                .buttonStyle(.plain)
+                .help(model.t("クリックして折りたたみ / 展開", "Click to collapse / expand"))
+
+                Spacer()
+
+                Button {
+                    model.moveURLToPDFSection(sectionID, delta: -1)
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .disabled(isFirst)
+                .help(model.t("上へ移動", "Move up"))
+
+                Button {
+                    model.moveURLToPDFSection(sectionID, delta: 1)
+                } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .disabled(isLast)
+                .help(model.t("下へ移動", "Move down"))
+            }
+            .padding(.horizontal, 4)
+
+            if !collapsed {
+                switch sectionID {
+                case .captureSettings:
+                    urlCaptureSettingsBox
+                case .queue:
+                    queueSectionView(showHeaderTitle: false)
+                case .history:
+                    fetchHistorySectionView(showHeaderTitle: false)
+                case .log:
+                    logBox(minHeight: 180, showTitle: false)
+                }
+            }
+        }
+    }
+
+    private func urlToPDFSectionTitle(_ sectionID: AppModel.URLToPDFSectionID) -> String {
+        switch sectionID {
+        case .queue:
+            return model.t("実行キュー (\(model.pdfQueue.count)件)", "Execution Queue (\(model.pdfQueue.count))")
+        case .history:
+            return model.t("取得履歴 (\(model.sortedFilteredHistory().count)件)", "Fetch History (\(model.sortedFilteredHistory().count))")
+        default:
+            return sectionID.title(model.uiLanguage)
+        }
+    }
+
+    private var urlCaptureSettingsBox: some View {
+        GroupBox {
                     VStack(alignment: .leading, spacing: 14) {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(model.t("① ソースURL（PDF / ページ送り対象サイト）", "① Source URL (PDF or paginated web viewer)"))
@@ -3727,18 +3882,13 @@ struct ContentView: View {
                     }
                     .padding(8)
                 }
-
-                queueSection
-
-                fetchHistorySection
-
-                logBox(minHeight: 180)
-            }
-            .padding(28)
-        }
     }
 
     private var queueSection: some View {
+        queueSectionView(showHeaderTitle: true)
+    }
+
+    private func queueSectionView(showHeaderTitle: Bool) -> some View {
         let pageSize = 5
         let orderedIndices = model.sortedQueueIndices()
         let totalCount = orderedIndices.count
@@ -3748,7 +3898,7 @@ struct ContentView: View {
         let endIdx = min(totalCount, startIdx + pageSize)
         let pageIndices = startIdx < endIdx ? Array(orderedIndices[startIdx..<endIdx]) : []
 
-        return GroupBox(model.t("実行キュー (\(model.pdfQueue.count)件)", "Execution Queue (\(model.pdfQueue.count))")) {
+        return GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 if !orderedIndices.isEmpty {
                     HStack(spacing: 8) {
@@ -4361,82 +4511,6 @@ struct ContentView: View {
     private var audioLabView: some View {
         VisibleScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                HStack(spacing: 10) {
-                    let fileMissing = model.ebookURL == nil
-                    Button {
-                        model.chooseEbook()
-                    } label: {
-                        topologyCard(
-                            model.t("① ファイル選択", "① Ebook File"),
-                            symbol: "doc.text",
-                            detail: model.ebookURL?.lastPathComponent ?? "PDF / EPUB / TXT",
-                            state: fileMissing ? .needsInput : .ready
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.t("クリックして変換するファイルを選択", "Click to choose ebook file"))
-
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-
-                    let langMissing = model.language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    Button {
-                        let formats = AppModel.OutputFormat.allCases
-                        if let idx = formats.firstIndex(of: model.outputFormat), !formats.isEmpty {
-                            model.outputFormat = formats[(idx + 1) % formats.count]
-                        }
-                    } label: {
-                        topologyCard(
-                            model.t("② 形式・言語", "② Format"),
-                            symbol: "music.note",
-                            detail: "\(model.languageDisplayName(model.language)) · \(model.outputFormat.rawValue)",
-                            state: langMissing ? .needsInput : .ready
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.t("クリックして出力形式（mp3 / m4b）を切り替え", "Click to toggle output format"))
-
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-
-                    let selectedModel = model.availableTTSModels.first(where: { $0.id == model.selectedTTSModelID })
-                    let modelReady = (selectedModel?.installed ?? false) || (selectedModel?.engine == "edge") || (selectedModel?.engine == "say")
-                    Button {
-                        let models = model.availableTTSModels
-                        if let idx = models.firstIndex(where: { $0.id == model.selectedTTSModelID }), !models.isEmpty {
-                            model.selectedTTSModelID = models[(idx + 1) % models.count].id
-                        }
-                    } label: {
-                        let currentName = selectedModel?.displayName(model.uiLanguage) ?? model.selectedTTSModelID
-                        topologyCard(
-                            model.t("③ 音声モデル", "③ Voice Model"),
-                            symbol: "waveform",
-                            detail: currentName,
-                            state: modelReady ? .ready : .needsInput
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.t("クリックして音声モデルを切り替え", "Click to cycle voice model"))
-
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-
-                    let canConvertAudio = model.canRun && !fileMissing && !langMissing && modelReady
-                    Button {
-                        model.startJob()
-                    } label: {
-                        topologyCard(
-                            model.t("④ 音声変換開始", "④ Convert"),
-                            symbol: "play.circle.fill",
-                            detail: canConvertAudio ? model.t("クリックで開始", "Click to Start") : model.t("①〜③を設定してください", "Complete ①–③"),
-                            state: canConvertAudio ? .actionReady : .disabled
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canConvertAudio)
-                    .help(model.t("クリックして音声変換を開始", "Click to start audio conversion"))
-                }
-                .padding(20)
-                .frame(maxWidth: .infinity)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-
                 inputGroup
 
                 HStack {
@@ -5046,90 +5120,6 @@ struct ContentView: View {
     private var pdfSqueezerView: some View {
         VisibleScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                HStack(spacing: 10) {
-                    let targetMissing = model.squeezerTargetURL == nil
-                    Button {
-                        model.chooseSqueezerPDF()
-                    } label: {
-                        topologyCard(
-                            model.t("① 対象PDF", "① Target"),
-                            symbol: "doc.fill",
-                            detail: model.squeezerTargetURL?.lastPathComponent ?? model.t("未選択", "Not selected"),
-                            state: targetMissing ? .needsInput : .ready
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.t("クリックして圧縮するPDFを選択", "Click to choose target PDF"))
-
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-
-                    Button {
-                        let presets = AppModel.PDFCompressionPreset.allCases
-                        if let idx = presets.firstIndex(of: model.squeezerPreset), !presets.isEmpty {
-                            model.squeezerPreset = presets[(idx + 1) % presets.count]
-                        }
-                    } label: {
-                        topologyCard(
-                            model.t("② 圧縮レベル", "② Preset"),
-                            symbol: "slider.horizontal.3",
-                            detail: model.squeezerPreset.label(model.uiLanguage),
-                            state: .ready
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.t("クリックして圧縮レベルを切り替え", "Click to cycle compression preset"))
-
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-
-                    Button {
-                        if model.squeezerSplitEnabled {
-                            model.squeezerSplitEnabled = false
-                            model.squeezerInPlace = false
-                        } else if !model.squeezerInPlace {
-                            model.squeezerInPlace = true
-                        } else {
-                            model.squeezerInPlace = false
-                            model.squeezerSplitEnabled = true
-                        }
-                    } label: {
-                        let outputDetail: String = {
-                            if model.squeezerSplitEnabled {
-                                let mb = model.squeezerMaxSizeMB.trimmingCharacters(in: .whitespacesAndNewlines)
-                                return model.t("AI分割 (≤ \(mb.isEmpty ? "10" : mb)MB)", "AI Split (≤ \(mb.isEmpty ? "10" : mb)MB)")
-                            }
-                            return model.squeezerInPlace ? model.t("上書き保存", "Overwrite") : "_compressed.pdf"
-                        }()
-                        topologyCard(
-                            model.t("③ 保存方法", "③ Output Mode"),
-                            symbol: model.squeezerSplitEnabled ? "folder.badge.plus" : "arrow.triangle.2.circlepath",
-                            detail: outputDetail,
-                            state: .ready
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.t("クリックして保存方法（別名 / 上書き / AIサイズ分割）を切り替え", "Click to cycle output mode"))
-
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-
-                    let canCompress = !targetMissing && !model.isRunning
-                    Button {
-                        model.runPDFSqueezer()
-                    } label: {
-                        topologyCard(
-                            model.squeezerSplitEnabled ? model.t("④ 圧縮・分割", "④ Split & Compress") : model.t("④ PDFを圧縮", "④ Compress"),
-                            symbol: "arrow.down.right.and.arrow.up.left.circle.fill",
-                            detail: canCompress ? model.t("クリックで開始", "Click to Start") : model.t("①〜③を設定してください", "Complete ①–③"),
-                            state: canCompress ? .actionReady : .disabled
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canCompress)
-                    .help(model.t("クリックしてPDF圧縮を開始", "Click to compress PDF"))
-                }
-                .padding(20)
-                .frame(maxWidth: .infinity)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-
                 GroupBox(model.t("圧縮設定", "Compression Settings")) {
                     VStack(alignment: .leading, spacing: 14) {
                         HStack(spacing: 10) {

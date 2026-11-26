@@ -1188,6 +1188,8 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
                 pass
         if changed:
             unchanged = 0
+            if (step + 1) % 20 == 0:
+                log(f"[Reader] Rewinding to cover... step {step + 1} (pos={cur_pos})")
         else:
             unchanged += 1
             page.wait_for_timeout(250)
