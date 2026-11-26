@@ -1482,6 +1482,110 @@ def matches_saved_reader_image(screenshot: bytes, saved_pdf: bytes, *, same_prin
         return False
 
 
+def _capture_clean_reader_frame(page, timeout_ms: int = 15000) -> bytes | None:
+    """Capture the Reader page view with Kindle UI chrome hidden, matching normal page capture."""
+    _hide_reader_chrome(page)
+    try:
+        box = _find_reader_page_box(page)
+        if box is None:
+            return None
+        return page.screenshot(clip=box, timeout=timeout_ms)
+    finally:
+        _restore_reader_chrome(page)
+
+
+def _matches_saved_reader_view(
+    page,
+    last_image_hash: str | None,
+    last_pdf: bytes | None,
+    last_reader_page: int | None,
+    expected_position_kind: str | None,
+) -> bool:
+    """Check whether the currently displayed Reader view matches the last saved checkpoint page."""
+    marker = get_reader_position(page)
+    position = marker[1] if marker and expected_position_kind in (None, marker[0]) else None
+    matches_position = last_reader_page is None or position is None or position == last_reader_page
+    if not matches_position:
+        return False
+    if last_image_hash is None:
+        return last_reader_page is not None and position == last_reader_page
+    frame = _capture_clean_reader_frame(page, timeout_ms=15000)
+    if frame is None:
+        return False
+    if hashlib.sha256(frame).hexdigest() == last_image_hash:
+        return True
+    if last_pdf is not None:
+        same_printed = (
+            last_reader_page is not None
+            and marker is not None
+            and marker[0] == expected_position_kind
+            and position == last_reader_page
+        )
+        if matches_saved_reader_image(frame, last_pdf, same_printed_page=same_printed):
+            log("[Reader] Verified the saved page by matching its image.")
+            return True
+    return False
+
+
+def _step_reader_once(page, key: str) -> bool:
+    """Press a turn key once and wait for either DOM/source change or a short settle delay."""
+    source = page.evaluate(READER_PAGE_SOURCE)
+    page.keyboard.press(key)
+    if source:
+        if not wait_for_reader_turn(page, source):
+            return False
+    else:
+        page.wait_for_timeout(450)
+    return not is_reader_oops(page)
+
+
+def _search_nearby_for_saved_view(
+    page,
+    turn_key: str,
+    reverse_key: str,
+    captured_count: int,
+    last_image_hash: str | None,
+    last_pdf: bytes | None,
+    last_reader_page: int | None,
+    expected_position_kind: str | None,
+    radius: int = 8,
+) -> bool:
+    """Check current view and +/- radius pages around it before doing any full rewind."""
+    if is_reader_oops(page):
+        return False
+    if _matches_saved_reader_view(page, last_image_hash, last_pdf, last_reader_page, expected_position_kind):
+        if _step_reader_once(page, turn_key):
+            log(f"[Reader] Resumed immediately from current view after captured page {captured_count}.")
+            return True
+        return False
+
+    # Search backward up to `radius` pages (Kindle often reopens 1-3 pages ahead or behind).
+    steps_back = 0
+    for _ in range(radius):
+        if not _step_reader_once(page, reverse_key):
+            break
+        steps_back += 1
+        if _matches_saved_reader_view(page, last_image_hash, last_pdf, last_reader_page, expected_position_kind):
+            if _step_reader_once(page, turn_key):
+                log(f"[Reader] Resumed after captured page {captured_count} (found {steps_back} step(s) back).")
+                return True
+            return False
+
+    # Return to origin and search forward up to `radius` pages.
+    for _ in range(steps_back):
+        if not _step_reader_once(page, turn_key):
+            return False
+    for step_fwd in range(1, radius + 1):
+        if not _step_reader_once(page, turn_key):
+            break
+        if _matches_saved_reader_view(page, last_image_hash, last_pdf, last_reader_page, expected_position_kind):
+            if _step_reader_once(page, turn_key):
+                log(f"[Reader] Resumed after captured page {captured_count} (found {step_fwd} step(s) ahead).")
+                return True
+            return False
+    return False
+
+
 def recover_reader_oops(
     page,
     start_url: str,
@@ -1517,19 +1621,43 @@ def recover_reader_oops(
                 rewind_reader_to_start(page, turn_key)
             return _wait_for_reader_reader(page)
 
-        if use_location and last_reader_page is not None and last_image_hash is not None:
+        reverse_key = "ArrowRight" if turn_key == "ArrowLeft" else "ArrowLeft"
+        expected_position_kind = "page" if expected_total_pages is not None else None
+
+        # 1. First check right where Kindle reopened (and +/- 8 pages around it) before jumping or rewinding.
+        if last_image_hash is not None:
+            log("[Reader] Checking reopened position and nearby pages for the last saved view...")
+            if _search_nearby_for_saved_view(
+                page, turn_key, reverse_key, captured_count,
+                last_image_hash, last_pdf, last_reader_page, expected_position_kind, radius=8,
+            ):
+                return True
+            if is_reader_oops(page):
+                return False
+
+        # 2. Try Go to Page / Go to Location using printed page or captured_count fallback.
+        jump_target = last_reader_page if last_reader_page is not None else (captured_count if captured_count > 0 else None)
+        if use_location and jump_target is not None and last_image_hash is not None:
             try:
-                log("[Reader] Trying number navigation before page turns or table of contents...")
+                log(f"[Reader] Trying number navigation (target={jump_target}) before table of contents or rewind...")
                 seek_reader_position(
-                    page, last_reader_page, expected_total_pages is not None, expected_total_pages,
+                    page, jump_target, expected_total_pages is not None, expected_total_pages,
                 )
             except Exception as exc:
                 log(f"[Reader] Go to Location unavailable ({type(exc).__name__}).")
                 page.keyboard.press("Escape")
             if is_reader_oops(page):
                 return False
+            if _search_nearby_for_saved_view(
+                page, turn_key, reverse_key, captured_count,
+                last_image_hash, last_pdf, last_reader_page, expected_position_kind, radius=10,
+            ):
+                return True
+            if is_reader_oops(page):
+                return False
 
-        if toc_offset is not None and last_image_hash is not None and last_reader_page is not None:
+        # 3. Try Table of Contents jump (even when printed page numbers are unavailable).
+        if toc_offset is not None and last_image_hash is not None:
             log("[Reader] Trying the table of contents to recover the page turn...")
             try:
                 jumped = jump_to_reader_chapter(page, toc_offset)
@@ -1539,15 +1667,17 @@ def recover_reader_oops(
                 if not _wait_for_reader_reader(page):
                     return False
                 jumped = False
-            if jumped and get_reader_page_number(page) is None:
+            if jumped and _search_nearby_for_saved_view(
+                page, turn_key, reverse_key, captured_count,
+                last_image_hash, last_pdf, last_reader_page, expected_position_kind, radius=12,
+            ):
+                return True
+            if is_reader_oops(page):
                 return False
 
-        # When the footer is unavailable, start the search from the beginning.
-        # A reopened book can restore a later position than the last capture.
+        # 4. Last resort: rewind to start when footer position is unavailable and walk forward.
         if last_reader_page is None or get_reader_page_number(page) is None:
             rewind_reader_to_start(page, turn_key)
-        reverse_key = "ArrowRight" if turn_key == "ArrowLeft" else "ArrowLeft"
-        expected_position_kind = "page" if expected_total_pages is not None else None
         previous_direction = None
         reversals = 0
         for _ in range(max(captured_count + 20, 40)):
@@ -1555,35 +1685,8 @@ def recover_reader_oops(
                 return False
             marker = get_reader_position(page)
             position = marker[1] if marker and expected_position_kind in (None, marker[0]) else None
-            source = page.evaluate(READER_PAGE_SOURCE)
-            if not source:
-                return False
-            if last_image_hash is not None:
-                box = _find_reader_page_box(page)
-                matches_image = False
-                if box is not None:
-                    frame = page.screenshot(clip=box, timeout=5000)
-                    matches_image = hashlib.sha256(frame).hexdigest() == last_image_hash
-                    if (
-                        not matches_image and last_pdf is not None
-                        and (
-                            last_reader_page is None
-                            or (
-                                marker is not None and marker[0] == expected_position_kind
-                                and position == last_reader_page
-                            )
-                        )
-                    ):
-                        matches_image = matches_saved_reader_image(frame, last_pdf)
-                        if matches_image:
-                            log("[Reader] Verified the saved page by matching its image.")
-            else:
-                # Reflowable layouts can lack a clipped page image.
-                matches_image = last_reader_page is not None and position == last_reader_page
-            matches_position = last_reader_page is None or position is None or position == last_reader_page
-            if matches_image and matches_position:
-                page.keyboard.press(turn_key)
-                if wait_for_reader_turn(page, source):
+            if _matches_saved_reader_view(page, last_image_hash, last_pdf, last_reader_page, expected_position_kind):
+                if _step_reader_once(page, turn_key):
                     log(f"[Reader] Resumed after captured page {captured_count}.")
                     return True
                 return False
@@ -1595,8 +1698,7 @@ def recover_reader_oops(
                     log("[Reader] Stopped seeking after crossing the saved page without verifying its image.")
                     return False
             previous_direction = direction
-            page.keyboard.press(direction)
-            if not wait_for_reader_turn(page, source):
+            if not _step_reader_once(page, direction):
                 return False
         log("[Reader] Could not verify the last captured page after reopening.")
         return False
@@ -2493,19 +2595,24 @@ def fetch_via_browser(
                     if needs_recovery or is_reader_oops(page):
                         if last_reader_page is not None and last_reader_page == expected_total_pages and last_reader_percent == 100:
                             break
-                        if recovery_attempts >= 4:
+                        if recovery_attempts >= 5:
                             raise IncompleteReaderCapture(
                                 f"リーダーのエラーから復旧できませんでした（取得済み: {page_idx - 1} ページ）。",
                                 page_idx - 1, expected_total_pages,
                             )
                         recovery_attempts += 1
-                        log(f"[Reader] Recovering before capture {page_idx} ({recovery_attempts}/4)...")
+                        if recovery_attempts > 1:
+                            cooldown_ms = min(8000, recovery_attempts * 2000)
+                            log(f"[Reader] Cooling down {cooldown_ms / 1000:.0f}s before retry {recovery_attempts}/5...")
+                            if not page.is_closed():
+                                page.wait_for_timeout(cooldown_ms)
+                        log(f"[Reader] Recovering before capture {page_idx} ({recovery_attempts}/5)...")
                         recovery_options = dict(
                             captured_count=page_idx - 1,
                             last_image_hash=last_reader_image_hash,
-                            toc_offset=1 if recovery_attempts == 4 else None,
+                            toc_offset=1 if recovery_attempts >= 3 else None,
                             book_title=book_title,
-                            use_location=recovery_attempts < 4,
+                            use_location=recovery_attempts <= 4,
                             expected_total_pages=expected_total_pages,
                             last_pdf=collected_page_pdfs[-1] if collected_page_pdfs else None,
                         )
