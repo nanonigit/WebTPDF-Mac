@@ -214,7 +214,7 @@ final class AppModel: ObservableObject {
 
         func title(_ lang: UILanguage) -> String {
             switch self {
-            case .activeJob: return lang == .ja ? "現在の作業状況・キュー進捗" : "Active Job & Queue Progress"
+            case .activeJob: return lang == .ja ? "現在の作業状況" : "Active Job"
             case .history: return lang == .ja ? "取得履歴" : "Fetch History"
             case .runtime: return lang == .ja ? "実行環境の準備状況" : "Runtime Environment"
             case .log: return lang == .ja ? "ログ" : "Log"
@@ -223,8 +223,8 @@ final class AppModel: ObservableObject {
     }
 
     enum QueueSortOrder: String, CaseIterable, Identifiable {
-        case newestFirst
         case oldestFirst
+        case newestFirst
         case byName
 
         var id: String { rawValue }
@@ -481,8 +481,28 @@ final class AppModel: ObservableObject {
     @Published private(set) var historyPageCountMessages: [UUID: String] = [:]
     @Published private(set) var libraryPDFWarnings: [String: Int] = [:]
     @Published var queuePageIndex: Int = 0
-    @Published var queueSortOrder: QueueSortOrder = .newestFirst
-    @Published var historySortOrder: QueueSortOrder = .newestFirst
+    @Published var queueSortOrder: QueueSortOrder = {
+        if let raw = UserDefaults.standard.string(forKey: "queueSortOrderRaw"),
+           let order = QueueSortOrder(rawValue: raw) {
+            return order
+        }
+        return .oldestFirst
+    }() {
+        didSet {
+            UserDefaults.standard.set(queueSortOrder.rawValue, forKey: "queueSortOrderRaw")
+        }
+    }
+    @Published var historySortOrder: QueueSortOrder = {
+        if let raw = UserDefaults.standard.string(forKey: "historySortOrderRaw"),
+           let order = QueueSortOrder(rawValue: raw) {
+            return order
+        }
+        return .oldestFirst
+    }() {
+        didSet {
+            UserDefaults.standard.set(historySortOrder.rawValue, forKey: "historySortOrderRaw")
+        }
+    }
     @Published var historyErrorsOnly: Bool = false
     @Published var dashboardSectionOrder: [DashboardSectionID] = {
         let fallback = DashboardSectionID.allCases
@@ -1430,8 +1450,9 @@ final class AppModel: ObservableObject {
     func redownloadAllWarningHistoryItems() {
         var added = 0
         for item in warningHistoryItems {
+            let key = normalizedDuplicateKey(item.url)
             let alreadyQueued = pdfQueue.contains(where: {
-                $0.url == item.url && $0.direction == item.direction
+                normalizedDuplicateKey($0.url) == key && $0.direction == item.direction
                     && ($0.status == .pending || $0.status == .running)
             })
             if !alreadyQueued {
@@ -4541,18 +4562,18 @@ struct ContentView: View {
                                     Text(model.t("取得済み: \(pages) ページ", "Captured: \(pages) page(s)"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
-                                } else {
+                                } else if model.progressText != "推定中" && model.progressText != "-" {
                                     Text(model.t("進捗: \(model.progressText)", "Progress: \(model.progressText)"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
-                                if let rem = model.remainingText as String?, rem != "-" {
-                                    Text(model.t("経過/残り: \(rem)", "Time: \(rem)"))
+                                if model.remainingText != "-" && model.remainingText != "推定中" {
+                                    Text(model.t("残り: \(model.remainingText)", "Remaining: \(model.remainingText)"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            Text(model.t("残りキュー: \(pendingCount) 件", "Remaining Queue: \(pendingCount)"))
+                            Text(model.t("待機中キュー: \(pendingCount) 件", "Queued: \(pendingCount)"))
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(pendingCount > 0 ? .orange : .secondary)
                         }
