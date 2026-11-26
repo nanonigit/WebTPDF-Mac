@@ -2219,10 +2219,53 @@ def measure_cover_aspect_ratio(png_bytes: bytes) -> float | None:
             cw = bbox[2] - bbox[0]
             ch = bbox[3] - bbox[1]
             if cw > 100 and ch > 100:
-                return max(0.65, min(1.65, ch / cw))
+                return max(0.65, min(1.55, ch / cw))
     except Exception:
         pass
     return None
+
+
+def measure_cover_aspect_ratio_from_page(page, png_bytes: bytes | None = None) -> tuple[float | None, str]:
+    """Measure the publisher's true cover aspect ratio (height/width) from DOM <img> first, then pixel bbox."""
+    js_find_cover_img = """() => {
+        let best = null;
+        let bestArea = 0;
+        for (const img of document.querySelectorAll('img')) {
+            const nw = img.naturalWidth || 0;
+            const nh = img.naturalHeight || 0;
+            if (nw < 180 || nh < 180) continue;
+            const rect = img.getBoundingClientRect();
+            if (rect.width < 120 || rect.height < 120) continue;
+            const area = rect.width * rect.height;
+            if (area > bestArea) {
+                bestArea = area;
+                best = { nw, nh };
+            }
+        }
+        return best;
+    }"""
+    best_img = None
+    best_area = 0
+    for scope in [page.main_frame] + [f for f in page.frames if f != page.main_frame]:
+        try:
+            info = scope.evaluate(js_find_cover_img)
+            if info and info.get("nw", 0) >= 180 and info.get("nh", 0) >= 180:
+                area = info["nw"] * info["nh"]
+                if area > best_area:
+                    best_area = area
+                    best_img = info
+        except Exception:
+            continue
+    if best_img is not None:
+        nw, nh = best_img["nw"], best_img["nh"]
+        raw_ratio = nh / nw
+        if 0.55 <= raw_ratio <= 1.85:
+            return max(0.65, min(1.55, raw_ratio)), f"img {nw}x{nh}"
+    if png_bytes:
+        ratio = measure_cover_aspect_ratio(png_bytes)
+        if ratio is not None:
+            return ratio, "bbox"
+    return None, "none"
 
 
 
@@ -2737,7 +2780,7 @@ def fetch_via_browser(
     auto_name: bool = False,
     reader_checkpoint: ReaderCheckpoint | None = None,
     result_details: dict[str, int] | None = None,
-    aspect_preset: str = "ipad",
+    aspect_preset: str = "auto",
 ) -> tuple[int, Path]:
     """Use CDP (logged-in Chrome) or headless Chromium to paginate with ArrowRight/ArrowLeft and capture PDFs."""
     turn_key = "ArrowLeft" if direction == "left" else "ArrowRight"
@@ -3190,8 +3233,9 @@ def fetch_via_browser(
                     if k_res is not None:
                         page_pdf_bytes, reader_png = k_res
                         if page_idx == 1 and created_page:
-                            cover_ratio = measure_cover_aspect_ratio(reader_png)
+                            cover_ratio, ratio_source = measure_cover_aspect_ratio_from_page(page, reader_png)
                             if cover_ratio is not None:
+                                log(f"[Reader] Cover aspect ratio: {cover_ratio:.3f} ({ratio_source}), preset={aspect_preset}")
                                 if cover_ratio < 1.15:
                                     # Keep natural landscape / spread aspect ratio for fixed-shape books (scores, spreads)
                                     target_w = READER_LANDSCAPE_VIEWPORT_WIDTH
@@ -3199,9 +3243,9 @@ def fetch_via_browser(
                                 elif aspect_preset in READER_ASPECT_PRESETS:
                                     target_w, target_h = READER_ASPECT_PRESETS[aspect_preset]
                                 else:
-                                    # auto: match cover aspect ratio
+                                    # auto: match the publisher's true cover aspect ratio
                                     target_w = READER_VIEWPORT_WIDTH
-                                    target_h = max(1100, min(1600, int(target_w * cover_ratio + 60)))
+                                    target_h = max(1100, min(1580, int(target_w * cover_ratio + 60)))
                                 try:
                                     page.set_viewport_size({"width": target_w, "height": target_h})
                                     page.wait_for_timeout(800)
@@ -3545,7 +3589,7 @@ def main() -> int:
     parser.add_argument("--max-pages", type=int, default=1000, help="Maximum pages to paginate (default: 1000)")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds (default: 30)")
     parser.add_argument("--direction", choices=["right", "left"], default="right", help="Page-turn key direction (default: right)")
-    parser.add_argument("--aspect-preset", choices=["ipad", "iphone", "pc", "auto"], default="ipad", help="Preferred viewport aspect ratio for reflowable books (default: ipad)")
+    parser.add_argument("--aspect-preset", choices=["auto", "ipad", "iphone", "pc"], default="auto", help="Preferred viewport aspect ratio for reflowable books (default: auto)")
     parser.add_argument("--no-browser", action="store_true", help="Disable Playwright browser fallback")
     parser.add_argument("--auto-name", action="store_true", help="Auto-name output as <Title>_<YYYYMMDD>.pdf when available")
     parser.add_argument("--reader-checkpoint", type=Path, help="Save and resume captured Reader pages")

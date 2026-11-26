@@ -607,33 +607,33 @@ final class AppModel: ObservableObject {
     @Published private(set) var isTestingOllama = false
     @Published private(set) var ollamaTestOutput = ""
     enum ReaderAspectPreset: String, CaseIterable, Identifiable, Codable, Hashable {
+        case auto = "auto"
         case ipad = "ipad"
         case iphone = "iphone"
         case pc = "pc"
-        case auto = "auto"
 
         var id: String { rawValue }
 
         func label(_ lang: UILanguage) -> String {
             switch self {
+            case .auto: return lang == .ja ? "自動 (表紙)" : "Auto (Cover)"
             case .ipad: return lang == .ja ? "iPad用 (3:4)" : "iPad (3:4)"
             case .iphone: return lang == .ja ? "iPhone用 (9:16)" : "iPhone (9:16)"
             case .pc: return lang == .ja ? "PC用 (4:3)" : "PC (4:3)"
-            case .auto: return lang == .ja ? "自動" : "Auto"
             }
         }
     }
 
     @Published var maxPagesSetting = "1000"
     @Published var readerAspectPreset: ReaderAspectPreset = {
-        if let raw = UserDefaults.standard.string(forKey: "readerAspectPresetRaw"),
+        if let raw = UserDefaults.standard.string(forKey: "readerAspectPresetV2"),
            let preset = ReaderAspectPreset(rawValue: raw) {
             return preset
         }
-        return .ipad
+        return .auto
     }() {
         didSet {
-            UserDefaults.standard.set(readerAspectPreset.rawValue, forKey: "readerAspectPresetRaw")
+            UserDefaults.standard.set(readerAspectPreset.rawValue, forKey: "readerAspectPresetV2")
         }
     }
     @Published var customPDFSaveDirectory: URL? = {
@@ -3689,7 +3689,7 @@ struct ContentView: View {
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
-                            .frame(maxWidth: 420)
+                            .frame(maxWidth: 460)
                             Text(model.t("※文字サイズ変更できる本のみ適用／漫画・楽譜など固定形は元の比率を維持", "* Applies to reflowable books only; fixed-layout books keep original shape"))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
