@@ -497,7 +497,7 @@ final class AppModel: ObservableObject {
            let order = QueueSortOrder(rawValue: raw) {
             return order
         }
-        return .oldestFirst
+        return .newestFirst
     }() {
         didSet {
             UserDefaults.standard.set(historySortOrder.rawValue, forKey: "historySortOrderRaw")
@@ -1135,14 +1135,16 @@ final class AppModel: ObservableObject {
     }
 
     func sortedQueueIndices() -> [Int] {
-        let indices = Array(pdfQueue.indices)
+        let running = pdfQueue.indices.filter { pdfQueue[$0].status == .running }
+        let rest = pdfQueue.indices.filter { pdfQueue[$0].status != .running }
+        let orderedRest: [Int]
         switch queueSortOrder {
         case .newestFirst:
-            return indices
+            orderedRest = rest
         case .oldestFirst:
-            return indices.reversed()
+            orderedRest = rest.reversed()
         case .byName:
-            return indices.sorted { lhs, rhs in
+            orderedRest = rest.sorted { lhs, rhs in
                 let lItem = pdfQueue[lhs]
                 let rItem = pdfQueue[rhs]
                 let lLabel = queueDisplayTitle(for: lItem) ?? lItem.url
@@ -1159,6 +1161,7 @@ final class AppModel: ObservableObject {
                 return lhs < rhs
             }
         }
+        return running + orderedRest
     }
 
     func removeDuplicateQueueItems() {
@@ -1225,7 +1228,8 @@ final class AppModel: ObservableObject {
     }
 
     func sortedFilteredHistory() -> [URLFetchHistoryItem] {
-        let base = historyErrorsOnly ? warningHistoryItems : urlFetchHistory
+        let source = historyErrorsOnly ? warningHistoryItems : urlFetchHistory
+        let base = source.filter { activeHistoryQueueStatus($0) == nil }
         switch historySortOrder {
         case .newestFirst:
             return base
@@ -3723,10 +3727,18 @@ struct ContentView: View {
                 } else {
                     ForEach(Array(pageIndices.enumerated()), id: \.element) { pos, index in
                         let item = model.pdfQueue[index]
+                        let pendingOrder = item.status == .pending
+                            ? model.pdfQueue.prefix(index + 1).filter { $0.status == .pending }.count
+                            : nil
                         HStack(spacing: 10) {
                             if item.status == .running {
                                 ProgressView()
                                     .controlSize(.small)
+                            } else if let orderNum = pendingOrder {
+                                Text("#\(orderNum)")
+                                    .font(.caption2.monospacedDigit().weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(minWidth: 22)
                             } else {
                                 Image(systemName: queueStatusSymbol(item.status))
                                     .foregroundStyle(queueStatusColor(item.status))
@@ -3826,6 +3838,13 @@ struct ContentView: View {
                             .buttonStyle(.borderless)
                             .disabled(item.status == .running)
                         }
+                        .padding(.horizontal, item.status == .running ? 8 : 0)
+                        .padding(.vertical, item.status == .running ? 6 : 2)
+                        .background(
+                            item.status == .running
+                            ? RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.10))
+                            : nil
+                        )
                         if pos < pageIndices.count - 1 {
                             Divider()
                         }
@@ -3860,55 +3879,47 @@ struct ContentView: View {
                         .padding(.top, 4)
                     }
 
-                    HStack(spacing: 10) {
-                        if model.isQueueAutoPaused {
-                            Button(model.t("自動実行を再開", "Resume Auto-Run")) {
-                                model.resumeQueueAutoRun()
+                    let hasFinishedQueueItems = model.pdfQueue.contains { $0.status == .completed || $0.status == .failed }
+                    if model.isQueueAutoPaused || (model.hasPendingQueueItems && !model.isRunning) || (model.hasFailedQueueItems && !model.isRunning) || (hasFinishedQueueItems && !model.isRunning) || (model.hasDuplicateQueueItems && !model.isRunning) {
+                        HStack(spacing: 10) {
+                            if model.isQueueAutoPaused {
+                                Button(model.t("次の本を再開", "Resume Next Book")) {
+                                    model.resumeQueueAutoRun()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.orange)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.orange)
-                        } else {
-                            Button(model.t("自動実行を一時停止", "Pause Auto-Run")) {
-                                model.pauseQueueAutoRun()
+
+                            if model.hasPendingQueueItems && !model.isRunning {
+                                Button(model.t("キューを連続実行", "Run Queue")) {
+                                    model.startQueue()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.blue)
                             }
-                            .buttonStyle(.bordered)
-                        }
 
-                        if model.hasPendingQueueItems && !model.isRunning {
-                            Button(model.t("キューを連続実行", "Run Queue")) {
-                                model.startQueue()
+                            if model.hasFailedQueueItems && !model.isRunning {
+                                Button(model.t("失敗分を再実行", "Retry Failed")) {
+                                    model.retryFailedQueueItems()
+                                }
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.blue)
-                        } else {
-                            Button(model.t("キューを連続実行", "Run Queue")) {
-                                model.startQueue()
+
+                            if hasFinishedQueueItems && !model.isRunning {
+                                Button(model.t("完了済みを整理", "Clear Finished")) {
+                                    model.clearFinishedQueueItems()
+                                }
                             }
-                            .disabled(true)
+
+                            if model.hasDuplicateQueueItems && !model.isRunning {
+                                Button(model.t("重複を整理", "Remove Duplicates")) {
+                                    model.removeDuplicateQueueItems()
+                                }
+                            }
+
+                            Spacer()
                         }
-
-                        Button(model.t("失敗分を再実行", "Retry Failed")) {
-                            model.retryFailedQueueItems()
-                        }
-                        .disabled(!model.hasFailedQueueItems || model.isRunning)
-
-                        Button(model.t("完了済みを整理", "Clear Finished")) {
-                            model.clearFinishedQueueItems()
-                        }
-                        .disabled(model.isRunning)
-
-                        Button(model.t("重複を整理", "Remove Duplicates")) {
-                            model.removeDuplicateQueueItems()
-                        }
-                        .disabled(!model.hasDuplicateQueueItems || model.isRunning)
-
-                        Spacer()
-
-                        Text(model.isQueueAutoPaused ? model.t("自動実行: 一時停止中", "Auto-Run: Paused") : model.t("自動実行: オン", "Auto-Run: ON"))
-                            .font(.caption)
-                            .foregroundStyle(model.isQueueAutoPaused ? .orange : .green)
+                        .padding(.top, 4)
                     }
-                    .padding(.top, 4)
                 }
             }
             .padding(8)
@@ -3928,7 +3939,7 @@ struct ContentView: View {
         let startIdx = currentPage * pageSize
         let endIdx = min(totalCount, startIdx + pageSize)
         let pageEntries = startIdx < endIdx ? Array(filteredHistory[startIdx..<endIdx]) : []
-        let warningCount = model.warningHistoryItems.count
+        let warningCount = model.warningHistoryItems.filter { model.activeHistoryQueueStatus($0) == nil }.count
 
         return GroupBox {
             VStack(alignment: .leading, spacing: 8) {
