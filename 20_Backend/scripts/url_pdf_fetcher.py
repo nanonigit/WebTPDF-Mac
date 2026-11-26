@@ -1656,10 +1656,10 @@ def _trim_outer_white_margin(rgb: Image.Image, pad_ratio: float = 0.015) -> Imag
 
 def capture_reader_page_as_pdf_bytes(
     page,
-    pad_ratio: float = 0.015,
+    pad_ratio: float = 0.02,
     cdp_session=None,
 ) -> tuple[bytes, bytes] | None:
-    """Capture the rendered Reader page via high-res clipped screenshot with clean margins."""
+    """Capture the rendered Reader page via clipped screenshot with uniform clean margins."""
     box = _find_reader_page_box(page)
     if not box:
         return None
@@ -1672,8 +1672,15 @@ def capture_reader_page_as_pdf_bytes(
 
     buf = io.BytesIO()
     with Image.open(io.BytesIO(png_bytes)) as img:
-        rgb = _trim_outer_white_margin(img.convert("RGB"), pad_ratio=pad_ratio)
-        rgb.save(buf, "PDF")
+        rgb = img.convert("RGB")
+        if pad_ratio > 0:
+            pad_x = max(8, int(round(rgb.width * pad_ratio)))
+            pad_y = max(10, int(round(rgb.height * pad_ratio)))
+            canvas = Image.new("RGB", (rgb.width + 2 * pad_x, rgb.height + 2 * pad_y), (255, 255, 255))
+            canvas.paste(rgb, (pad_x, pad_y))
+            canvas.save(buf, "PDF")
+        else:
+            rgb.save(buf, "PDF")
     return buf.getvalue(), png_bytes
 
 
@@ -1757,10 +1764,7 @@ def capture_page_as_pdf_bytes(page, cdp_session=None) -> bytes:
                     _restore_reader_chrome(page)
             buf = io.BytesIO()
             with Image.open(io.BytesIO(png_bytes)) as img:
-                rgb = img.convert("RGB")
-                if reader_mode:
-                    rgb = _trim_outer_white_margin(rgb, pad_ratio=0.015)
-                rgb.save(buf, "PDF")
+                img.convert("RGB").save(buf, "PDF")
             return buf.getvalue()
     finally:
         remove_print_cleanup(page)

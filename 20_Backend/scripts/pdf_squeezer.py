@@ -159,6 +159,26 @@ def _measure_page_content_rect(
     return fitz.Rect(mb.x0 + x0 * sx, mb.y0 + top * sy, mb.x0 + x1 * sx, mb.y0 + bot * sy)
 
 
+def _fit_interval_inside(start: float, end: float, target_len: float, bound_min: float, bound_max: float) -> tuple[float, float]:
+    """Expand [start, end] to at least target_len centered on content, shifting within [bound_min, bound_max]."""
+    cur_len = end - start
+    if cur_len >= target_len:
+        return start, end
+    avail = bound_max - bound_min
+    if avail <= target_len:
+        return bound_min, bound_max
+    center = (start + end) / 2.0
+    new_start = center - target_len / 2.0
+    new_end = center + target_len / 2.0
+    if new_start < bound_min:
+        new_end += bound_min - new_start
+        new_start = bound_min
+    if new_end > bound_max:
+        new_start -= new_end - bound_max
+        new_end = bound_max
+    return max(bound_min, new_start), min(bound_max, new_end)
+
+
 def trim_pdf_to_cover(doc: fitz.Document) -> int:
     """Trim margins and verified static reader chrome across all pages using cover dimensions as baseline."""
     if len(doc) == 0:
@@ -174,20 +194,19 @@ def trim_pdf_to_cover(doc: fitz.Document) -> int:
         page = doc[idx]
         mb = page.mediabox
         content = _measure_page_content_rect(page, top_cut, bot_offset)
-        if content is None or content.width <= 20 or content.height <= 20:
+        if content is None or content.width <= 1 or content.height <= 1:
+            if cover_w is not None and cover_h is not None:
+                # Blank/sparse page: keep cover size centered in mediabox
+                x0, x1 = _fit_interval_inside(mb.x0, mb.x1, cover_w, mb.x0, mb.x1)
+                y0, y1 = _fit_interval_inside(mb.y0, mb.y1, cover_h, mb.y0, mb.y1)
+                page.set_cropbox(fitz.Rect(x0, y0, x1, y1))
             continue
 
         target = fitz.Rect(content)
         if cover_w is not None and cover_h is not None and idx > 0:
-            # Expand symmetrically to at least cover size when it fits inside the page mediabox
-            if target.width < cover_w:
-                cx = (target.x0 + target.x1) / 2.0
-                target.x0 = max(mb.x0, cx - cover_w / 2.0)
-                target.x1 = min(mb.x1, cx + cover_w / 2.0)
-            if target.height < cover_h:
-                cy = (target.y0 + target.y1) / 2.0
-                target.y0 = max(mb.y0, cy - cover_h / 2.0)
-                target.y1 = min(mb.y1, cy + cover_h / 2.0)
+            x0, x1 = _fit_interval_inside(target.x0, target.x1, cover_w, mb.x0, mb.x1)
+            y0, y1 = _fit_interval_inside(target.y0, target.y1, cover_h, mb.y0, mb.y1)
+            target = fitz.Rect(x0, y0, x1, y1)
 
         target &= mb
         if target.width > 20 and target.height > 20:
