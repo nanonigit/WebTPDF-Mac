@@ -1068,7 +1068,7 @@ class ReaderCheckpoint:
     def save_verified_gap(self, ordinal: int, pdf: bytes) -> None:
         with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("CREATE TABLE IF NOT EXISTS verified_gaps (ordinal INTEGER PRIMARY KEY, pdf BLOB NOT NULL)")
-            db.execute("INSERT INTO verified_gaps VALUES (?, ?)", (ordinal, pdf))
+            db.execute("INSERT OR REPLACE INTO verified_gaps VALUES (?, ?)", (ordinal, pdf))
 
     def final_path(self, proposed: Path) -> Path:
         with closing(sqlite3.connect(self.path)) as db, db:
@@ -2063,10 +2063,14 @@ def reader_gap_candidates(captures: list[ReaderCapture]) -> list[tuple[int, Read
 def reader_frame_matches(page, saved: ReaderCapture) -> bool:
     if not saved.image_hash or get_reader_position(page) != ("page", saved.position) or is_reader_oops(page):
         return False
-    box = _find_reader_page_box(page)
-    if box is None:
-        return False
-    frame = page.screenshot(clip=box, timeout=5000)
+    _hide_reader_chrome(page)
+    try:
+        box = _find_reader_page_box(page)
+        if box is None:
+            return False
+        frame = page.screenshot(clip=box, timeout=15000)
+    finally:
+        _restore_reader_chrome(page)
     return (
         hashlib.sha256(frame).hexdigest() == saved.image_hash
         or matches_saved_reader_image(frame, saved.pdf, same_printed_page=True)
@@ -2178,6 +2182,39 @@ def verify_merged_reader_pdf(pdfs: list[bytes], output: Path, count: int) -> Non
     log(f"[Verify] Final PDF reopened and all {count} pages matched the saved order.")
 
 
+def _get_cdp_target_id(context, page) -> str | None:
+    """Return the Chrome CDP targetId for a page so it can be closed even if Playwright is interrupted."""
+    try:
+        session = context.new_cdp_session(page)
+        try:
+            info = session.send("Target.getTargetInfo")
+            return info.get("targetInfo", {}).get("targetId")
+        finally:
+            try:
+                session.detach()
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+
+def _close_page_safely(page, cdp_url: str | None = None, target_id: str | None = None) -> None:
+    """Close a Playwright page, falling back to Chrome CDP HTTP /json/close when greenlet state is broken."""
+    closed = False
+    if page is not None:
+        try:
+            if not page.is_closed():
+                page.close()
+            closed = True
+        except Exception:
+            pass
+    if not closed and cdp_url and target_id:
+        try:
+            requests.get(f"{cdp_url.rstrip('/')}/json/close/{target_id}", timeout=2)
+        except Exception:
+            pass
+
+
 def finish_reader_at_end(
     start_url: str, proposed_output: Path, turn_key: str,
     checkpoint: ReaderCheckpoint, captures: list[ReaderCapture],
@@ -2200,7 +2237,9 @@ def finish_reader_at_end(
                 raise RuntimeError("The ebook reader browser session is not available")
             with sync_playwright() as p:
                 browser = p.chromium.connect_over_cdp(endpoint)
-                page = browser.contexts[0].new_page()
+                context = browser.contexts[0]
+                page = context.new_page()
+                page_target_id = _get_cdp_target_id(context, page)
                 try:
                     page.set_viewport_size({"width": _infer_saved_viewport_width(captures), "height": captures[-1].viewport_height or READER_DEFAULT_HEIGHT})
                     page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
@@ -2225,7 +2264,7 @@ def finish_reader_at_end(
                             unchecked -= 1
                             log(f"READER_UNVERIFIED_GAPS={unchecked}")
                 finally:
-                    page.close()
+                    _close_page_safely(page, endpoint, page_target_id)
         except Exception as exc:
             log(f"[Reader] Some intervals could not be checked: {exc}")
 
@@ -2285,9 +2324,11 @@ def fetch_via_browser(
             is_reader_url = "read.amazon." in start_url.lower()
             page = None if is_reader_url else next((pg for pg in context.pages if pg.url == start_url), None)
             created_page = False
+            page_target_id: str | None = None
             if page is None:
                 page = context.new_page()
                 created_page = True
+                page_target_id = _get_cdp_target_id(context, page)
         else:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
@@ -2296,6 +2337,7 @@ def fetch_via_browser(
             )
             page = context.new_page()
             created_page = True
+            page_target_id = None
 
         cdp_session = None
         try:
@@ -2432,6 +2474,7 @@ def fetch_via_browser(
             oreilly_last_filename: str | None = None
             recovery_attempts = 0
             needs_recovery = bool(saved_pages) and reader_mode
+            clean_single_turn = False
             if saved_pages:
                 last_capture = saved_pages[-1]
                 prev_pdf_hash = pdf_content_signature(last_capture.pdf)
@@ -2474,8 +2517,10 @@ def fetch_via_browser(
                             log("[Reader] Trying a new tab with the current browser session...")
                             recovered = False
                             candidate = None
+                            candidate_target_id: str | None = None
                             try:
                                 candidate = context.new_page()
+                                candidate_target_id = _get_cdp_target_id(context, candidate) if use_cdp else None
                                 if page.viewport_size:
                                     candidate.set_viewport_size(page.viewport_size)
                                 elif created_page:
@@ -2488,13 +2533,10 @@ def fetch_via_browser(
                                 log(f"[Reader] New-tab recovery failed ({type(exc).__name__}).")
                             finally:
                                 if candidate is not None and not recovered:
-                                    try:
-                                        candidate.close()
-                                    except Exception:
-                                        pass
+                                    _close_page_safely(candidate, active_cdp_url, candidate_target_id)
                             if recovered:
-                                previous_page, previous_owned = page, created_page
-                                page, created_page = candidate, True
+                                previous_page, previous_owned, previous_target_id = page, created_page, page_target_id
+                                page, created_page, page_target_id = candidate, True, candidate_target_id
                                 page.on("response", handle_response)
                                 cdp_session = None
                                 try:
@@ -2502,10 +2544,7 @@ def fetch_via_browser(
                                 except Exception:
                                     pass
                                 if previous_owned:
-                                    try:
-                                        previous_page.close()
-                                    except Exception:
-                                        pass
+                                    _close_page_safely(previous_page, active_cdp_url, previous_target_id)
                                 log("[Reader] Switched capture to the verified new tab.")
                         needs_recovery = not recovered
                         if recovered and book_title is None:
@@ -2855,6 +2894,8 @@ def fetch_via_browser(
                             expected_total_pages, last_reader_percent,
                             page.viewport_size["height"] if created_page and page.viewport_size else None,
                         ))
+                        if clean_single_turn and page_idx > 1:
+                            reader_checkpoint.save_verified_gap(page_idx - 1, b"")
                 elif reader_checkpoint is not None:
                     reader_checkpoint.append(page_idx, ReaderCapture(
                         page_pdf_bytes, page_idx, current_pdf_hash,
@@ -2873,8 +2914,10 @@ def fetch_via_browser(
                     page.keyboard.press(turn_key)
                     if source:
                         # Let the next iteration handle unchanged pages and reader errors.
-                        wait_for_reader_turn(page, source)
+                        turned = wait_for_reader_turn(page, source)
+                        clean_single_turn = bool(turned and not is_reader_oops(page))
                         continue
+                    clean_single_turn = False
                     if is_reader_oops(page):
                         continue
                 else:
@@ -2960,10 +3003,7 @@ def fetch_via_browser(
             return written, resolved_output
         finally:
             if created_page:
-                try:
-                    page.close()
-                except Exception:
-                    pass
+                _close_page_safely(page, active_cdp_url, page_target_id)
             if not use_cdp:
                 try:
                     browser.close()

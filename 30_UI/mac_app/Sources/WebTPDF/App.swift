@@ -3778,6 +3778,30 @@ struct ContentView: View {
                             .frame(width: 150)
                             .disabled(item.status == .running)
 
+                            if item.status == .running {
+                                if model.isRunningQueue {
+                                    if model.isQueueAutoPaused {
+                                        Button(model.t("完了後停止を解除", "Cancel Pause")) {
+                                            model.isQueueAutoPaused = false
+                                        }
+                                        .controlSize(.small)
+                                    } else {
+                                        Button(model.t("この本が終わったら停止", "Stop After This Book")) {
+                                            model.pauseQueueAutoRun()
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                        .tint(.orange)
+                                        .controlSize(.small)
+                                    }
+                                }
+                                Button(model.t("今すぐ停止", "Stop Now"), role: .destructive) {
+                                    model.cancelJob()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
+                                .controlSize(.small)
+                            }
+
                             if let out = item.outputURL {
                                 Button(model.t("開く", "Open")) {
                                     NSWorkspace.shared.open(out)
@@ -4026,7 +4050,13 @@ struct ContentView: View {
                                                 .monospacedDigit()
                                         }
                                     }
-                                    if let path = entry.outputPath {
+                                    if isFetchingEntry {
+                                        Text(model.t("再取得中...", "Re-fetching..."))
+                                            .foregroundStyle(.secondary)
+                                    } else if queueStatus == .pending {
+                                        Text(model.t("待機中...", "Queued..."))
+                                            .foregroundStyle(.secondary)
+                                    } else if let path = entry.outputPath {
                                         Text(URL(fileURLWithPath: path).lastPathComponent)
                                             .lineLimit(1)
                                             .truncationMode(.middle)
