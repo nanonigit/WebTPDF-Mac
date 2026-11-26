@@ -266,14 +266,14 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
             uw = ux1 - ux0
             uh = uy1 - uy0
             if uw >= max_w * 0.35 and uh >= max_h * 0.35:
-                pad_x = max(8.0, uw * 0.015)
-                pad_y = max(10.0, uh * 0.015)
+                pad_x = 2.0
+                pad_y = 2.0
                 cx0 = max(0.0, ux0 - pad_x)
                 cy0 = max(0.0, uy0 - pad_y)
                 cx1 = min(max_w, ux1 + pad_x)
                 cy1 = min(max_h, uy1 + pad_y)
-                # Only apply book-wide crop when it removes noticeable outer white letterbox (>3%).
-                if (cx1 - cx0) < max_w * 0.97 or (cy1 - cy0) < max_h * 0.97:
+                # Only apply book-wide crop when it removes noticeable outer white letterbox (>1.5%).
+                if (cx1 - cx0) < max_w * 0.985 or (cy1 - cy0) < max_h * 0.985:
                     crop_x0, crop_y0, crop_x1, crop_y1 = cx0, cy0, cx1, cy1
 
         out_w = round(crop_x1 - crop_x0, 2)
@@ -2181,7 +2181,7 @@ def _trim_outer_white_margin(rgb: Image.Image, pad_ratio: float = 0.015) -> Imag
 
 def capture_reader_page_as_pdf_bytes(
     page,
-    pad_ratio: float = 0.02,
+    pad_ratio: float = 0.0,
     cdp_session=None,
 ) -> tuple[bytes, bytes] | None:
     """Capture the rendered Reader page via clipped screenshot with uniform clean margins."""
@@ -3239,13 +3239,13 @@ def fetch_via_browser(
                                 if cover_ratio < 1.15:
                                     # Keep natural landscape / spread aspect ratio for fixed-shape books (scores, spreads)
                                     target_w = READER_LANDSCAPE_VIEWPORT_WIDTH
-                                    target_h = max(950, min(1360, int(target_w * cover_ratio + 80)))
+                                    target_h = max(900, min(1360, int(round(target_w * cover_ratio))))
                                 elif aspect_preset in READER_ASPECT_PRESETS:
                                     target_w, target_h = READER_ASPECT_PRESETS[aspect_preset]
                                 else:
-                                    # auto: match the publisher's true cover aspect ratio
+                                    # auto: match the publisher's exact cover aspect ratio without extra vertical padding
                                     target_w = READER_VIEWPORT_WIDTH
-                                    target_h = max(1100, min(1580, int(target_w * cover_ratio + 60)))
+                                    target_h = max(1000, min(1560, int(round(target_w * cover_ratio))))
                                 try:
                                     page.set_viewport_size({"width": target_w, "height": target_h})
                                     page.wait_for_timeout(800)
