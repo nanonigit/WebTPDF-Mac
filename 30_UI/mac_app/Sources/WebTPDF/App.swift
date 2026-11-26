@@ -456,6 +456,7 @@ final class AppModel: ObservableObject {
         else {
             return []
         }
+        decoded.removeAll { $0.status == .completed || $0.status == .failed }
         for idx in decoded.indices where decoded[idx].status == .running {
             decoded[idx].status = .pending
         }
@@ -1394,13 +1395,20 @@ final class AppModel: ObservableObject {
     }
 
     func redownloadFromHistory(_ item: URLFetchHistoryItem) {
-        guard !pdfQueue.contains(where: {
-            $0.url == item.url && $0.direction == item.direction
-                && ($0.status == .pending || $0.status == .running)
-        }) else {
+        if let running = pdfQueue.first(where: {
+            $0.url == item.url && $0.direction == item.direction && $0.status == .running
+        }) {
+            _ = running
             return
         }
-        pdfQueue.insert(PDFQueueItem(url: item.url, direction: item.direction), at: 0)
+        if let existingIdx = pdfQueue.firstIndex(where: {
+            $0.url == item.url && $0.direction == item.direction && $0.status == .pending
+        }) {
+            let existing = pdfQueue.remove(at: existingIdx)
+            pdfQueue.insert(existing, at: 0)
+        } else {
+            pdfQueue.insert(PDFQueueItem(url: item.url, direction: item.direction, bookTitle: item.bookTitle), at: 0)
+        }
         queuePageIndex = 0
         isQueueAutoPaused = false
         if !isRunning {
@@ -1529,19 +1537,30 @@ final class AppModel: ObservableObject {
                 guard let index = self.pdfQueue.firstIndex(where: { $0.id == item.id }) else { continue }
                 switch outcome {
                 case let .success((mergedURL, result)):
-                    self.pdfQueue[index].status = .completed
-                    self.pdfQueue[index].outputURL = mergedURL
                     self.ebookURL = mergedURL
                     self.fetchedPDFURL = mergedURL
                     self.fetchedFromSourceURL = item.url
                     self.outputDirectory = mergedURL.deletingLastPathComponent()
-                    self.recordURLFetchHistory(url: item.url, direction: item.direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages)
+                    self.recordURLFetchHistory(url: item.url, direction: item.direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages, bookTitle: result.bookTitle ?? item.bookTitle)
+                    self.pdfQueue.remove(at: index)
+                    let totalPages = max(1, (self.pdfQueue.count + 4) / 5)
+                    if self.queuePageIndex >= totalPages {
+                        self.queuePageIndex = max(0, totalPages - 1)
+                    }
                     self.appendLog("[Queue #\(processedCount)] Saved -> \(mergedURL.path)\n")
                 case let .failure(error):
-                    if !self.cancelRequested { failedCount += 1 }
-                    self.pdfQueue[index].status = self.cancelRequested ? .pending : .failed
-                    self.pdfQueue[index].errorMessage = self.cancelRequested ? nil : error.localizedDescription
                     self.recordURLFetchFailure(url: item.url, direction: item.direction, error: error)
+                    if self.cancelRequested {
+                        self.pdfQueue[index].status = .pending
+                        self.pdfQueue[index].errorMessage = nil
+                    } else {
+                        failedCount += 1
+                        self.pdfQueue.remove(at: index)
+                        let totalPages = max(1, (self.pdfQueue.count + 4) / 5)
+                        if self.queuePageIndex >= totalPages {
+                            self.queuePageIndex = max(0, totalPages - 1)
+                        }
+                    }
                     self.appendLog("[Queue #\(processedCount)] \(error.localizedDescription)\n")
                 }
             }
@@ -3846,17 +3865,31 @@ struct ContentView: View {
 
                         Spacer()
 
-                        Button {
-                            model.historyErrorsOnly.toggle()
-                            model.historyPageIndex = 0
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: model.historyErrorsOnly ? "exclamationmark.triangle.fill" : "line.3.horizontal.decrease.circle")
-                                Text(model.t("エラーのみ表示 (\(warningCount))", "Errors Only (\(warningCount))"))
+                        if model.historyErrorsOnly {
+                            Button {
+                                model.historyErrorsOnly = false
+                                model.historyPageIndex = 0
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "list.bullet")
+                                    Text(model.t("すべて表示", "Show All"))
+                                }
                             }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.blue)
+                        } else {
+                            Button {
+                                model.historyErrorsOnly = true
+                                model.historyPageIndex = 0
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "exclamationmark.triangle")
+                                    Text(model.t("エラーのみ表示 (\(warningCount))", "Errors Only (\(warningCount))"))
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(warningCount == 0)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(model.historyErrorsOnly ? .orange : (warningCount > 0 ? .secondary : .gray))
 
                         if warningCount > 0 {
                             Button(model.t("エラーを一括再DL", "Re-download Errors")) {
@@ -4014,13 +4047,12 @@ struct ContentView: View {
 
                             let retryButton = Button(
                                 isFetchingEntry ? model.t("取得中…", "Fetching…")
-                                : queueStatus == .pending ? model.t("待機中", "Queued")
                                 : model.t("再ダウンロード", "Re-download")
                             ) {
                                 model.redownloadFromHistory(entry)
                             }
-                            .disabled(isFetchingEntry || queueStatus != nil)
-                            if entry.hasWarning && !isFetchingEntry && queueStatus == nil {
+                            .disabled(isFetchingEntry)
+                            if entry.hasWarning && !isFetchingEntry {
                                 retryButton
                                     .buttonStyle(.borderedProminent)
                                     .tint(.orange)
