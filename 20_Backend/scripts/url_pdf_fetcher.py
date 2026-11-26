@@ -1528,11 +1528,12 @@ READER_DEFAULT_HEIGHT = 1600
 
 READER_CHROME_HIDE_SCRIPT = """() => {
     const selectors = [
-        'header', 'footer', 'nav', 'ion-header', 'ion-footer',
+        'header', 'footer', 'nav', 'ion-header', 'ion-footer', 'ion-toolbar',
         '#reader-header', '#reader-footer',
         '#kr-chevron-left', '#kr-chevron-right',
         '[class*="kr-header" i]', '[class*="kr-footer" i]',
         '[class*="scrubber" i]', '[role="slider"]', 'ion-range',
+        '[class*="bookmark" i]', '[aria-label*="bookmark" i]', '[aria-label*="ブックマーク" i]',
         '[aria-label="Reader menu"]', '[aria-label="メニュー"]'
     ];
     for (const sel of selectors) {
@@ -1544,15 +1545,17 @@ READER_CHROME_HIDE_SCRIPT = """() => {
         });
     }
     const vh = window.innerHeight || 0;
-    document.querySelectorAll('div, section, aside').forEach(el => {
+    document.querySelectorAll('*').forEach(el => {
         if (el.hasAttribute('data-ec-reader-hide')) return;
+        const tag = el.tagName;
+        if (tag === 'HTML' || tag === 'BODY' || tag === 'IMG' || tag === 'CANVAS' || tag === 'SCRIPT' || tag === 'STYLE') return;
         if (el.querySelector('img[src^="blob:"], canvas')) return;
         const st = window.getComputedStyle(el);
-        if (st.position !== 'fixed' && st.position !== 'absolute') return;
+        if (st.position !== 'fixed' && st.position !== 'absolute' && st.position !== 'sticky') return;
         const r = el.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) return;
-        const isTopBar = r.top <= 24 && r.height <= 140 && r.width >= 200;
-        const isBottomBar = vh > 0 && r.bottom >= vh - 24 && r.top >= vh - 190 && r.height <= 190 && r.width >= 200;
+        const isTopBar = r.top <= 30 && r.height <= 160 && r.width >= 200;
+        const isBottomBar = vh > 0 && r.bottom >= vh - 30 && r.top >= vh - 200 && r.height <= 200 && r.width >= 200;
         if (isTopBar || isBottomBar) {
             el.setAttribute('data-ec-reader-hide', el.style.display || '');
             el.style.setProperty('display', 'none', 'important');
@@ -1569,17 +1572,19 @@ READER_CHROME_RESTORE_SCRIPT = """() => {
 
 
 def _hide_reader_chrome(page) -> None:
-    try:
-        page.evaluate(READER_CHROME_HIDE_SCRIPT)
-    except Exception:
-        pass
+    for scope in [page, *getattr(page, "frames", [])]:
+        try:
+            scope.evaluate(READER_CHROME_HIDE_SCRIPT)
+        except Exception:
+            pass
 
 
 def _restore_reader_chrome(page) -> None:
-    try:
-        page.evaluate(READER_CHROME_RESTORE_SCRIPT)
-    except Exception:
-        pass
+    for scope in [page, *getattr(page, "frames", [])]:
+        try:
+            scope.evaluate(READER_CHROME_RESTORE_SCRIPT)
+        except Exception:
+            pass
 
 
 def _find_reader_page_box_in_scope(scope) -> dict | None:
@@ -1660,12 +1665,11 @@ def capture_reader_page_as_pdf_bytes(
     cdp_session=None,
 ) -> tuple[bytes, bytes] | None:
     """Capture the rendered Reader page via clipped screenshot with uniform clean margins."""
-    box = _find_reader_page_box(page)
-    if not box:
-        return None
-
     _hide_reader_chrome(page)
     try:
+        box = _find_reader_page_box(page)
+        if not box:
+            return None
         png_bytes = page.screenshot(clip=box, timeout=15000)
     finally:
         _restore_reader_chrome(page)
