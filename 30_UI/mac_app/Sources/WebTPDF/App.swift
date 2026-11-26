@@ -1434,6 +1434,27 @@ final class AppModel: ObservableObject {
             _ = running
             return
         }
+        if let hIdx = urlFetchHistory.firstIndex(where: { $0.id == item.id }) {
+            let existing = urlFetchHistory.remove(at: hIdx)
+            let bumped = URLFetchHistoryItem(
+                id: existing.id,
+                url: existing.url,
+                direction: existing.direction,
+                timestamp: Date(),
+                outputPath: existing.outputPath,
+                succeeded: existing.succeeded,
+                errorMessage: existing.errorMessage,
+                pageCount: existing.pageCount,
+                expectedPages: existing.expectedPages,
+                lastPrintedPage: existing.lastPrintedPage,
+                unverifiedGaps: existing.unverifiedGaps,
+                verifiedPages: existing.verifiedPages,
+                loadingPages: existing.loadingPages,
+                bookTitle: existing.bookTitle
+            )
+            urlFetchHistory.insert(bumped, at: 0)
+            saveURLFetchHistory()
+        }
         if let existingIdx = pdfQueue.firstIndex(where: {
             $0.url == item.url && $0.direction == item.direction && $0.status == .pending
         }) {
