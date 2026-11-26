@@ -194,7 +194,7 @@ def _infer_saved_viewport_width(captures: list) -> int:
 
 
 def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
-    """Normalize all reader pages to a single uniform page size (cover/max content size)."""
+    """Normalize all reader pages to one uniform book size and trim shared outer white letterbox margins."""
     if len(pdf_blobs) < 2:
         return pdf_blobs
     try:
@@ -216,25 +216,131 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
         if max_w < 100 or max_h < 100:
             return pdf_blobs
 
+        # 1. Sample up to 24 evenly spaced single-page blobs to compute the book-wide non-white union bbox
+        #    in uniform (max_w x max_h) centered coordinates.
+        single_indices = [i for i, sz in enumerate(rects) if sz is not None]
+        if not single_indices:
+            return pdf_blobs
+        sample_count = min(24, len(single_indices))
+        sample_indices = sorted(
+            {single_indices[0]}
+            | {single_indices[int(k * (len(single_indices) - 1) / max(1, sample_count - 1))] for k in range(sample_count)}
+        )
+
+        def _non_white_bbox_in_canvas(blob: bytes, rw: float, rh: float) -> tuple[float, float, float, float] | None:
+            with pymupdf.open(stream=blob, filetype="pdf") as d:
+                pix = d[0].get_pixmap(dpi=72)
+                if pix.width < 10 or pix.height < 10:
+                    return None
+                im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                bb = im.point(lambda x: 0 if x > 246 else 255).getbbox()
+                if not bb:
+                    return None
+                sx = rw / pix.width
+                sy = rh / pix.height
+                ox = (max_w - rw) / 2.0
+                oy = (max_h - rh) / 2.0
+                return (ox + bb[0] * sx, oy + bb[1] * sy, ox + bb[2] * sx, oy + bb[3] * sy)
+
+        cover_bbox: tuple[float, float, float, float] | None = None
+        sample_bboxes: list[tuple[float, float, float, float]] = []
+        for idx in sample_indices:
+            sz = rects[idx]
+            if sz is None:
+                continue
+            bb = _non_white_bbox_in_canvas(pdf_blobs[idx], sz[0], sz[1])
+            if bb is None:
+                continue
+            if (bb[2] - bb[0]) >= max_w * 0.15 and (bb[3] - bb[1]) >= max_h * 0.15:
+                sample_bboxes.append(bb)
+                if idx == single_indices[0]:
+                    cover_bbox = bb
+
+        # Compute uniform book crop rect with a clean ~1.5% margin around the book-wide union.
+        crop_x0, crop_y0, crop_x1, crop_y1 = 0.0, 0.0, max_w, max_h
+        if sample_bboxes:
+            ux0 = min(b[0] for b in sample_bboxes)
+            uy0 = min(b[1] for b in sample_bboxes)
+            ux1 = max(b[2] for b in sample_bboxes)
+            uy1 = max(b[3] for b in sample_bboxes)
+            uw = ux1 - ux0
+            uh = uy1 - uy0
+            if uw >= max_w * 0.35 and uh >= max_h * 0.35:
+                pad_x = max(8.0, uw * 0.015)
+                pad_y = max(10.0, uh * 0.015)
+                cx0 = max(0.0, ux0 - pad_x)
+                cy0 = max(0.0, uy0 - pad_y)
+                cx1 = min(max_w, ux1 + pad_x)
+                cy1 = min(max_h, uy1 + pad_y)
+                # Only apply book-wide crop when it removes noticeable outer white letterbox (>3%).
+                if (cx1 - cx0) < max_w * 0.97 or (cy1 - cy0) < max_h * 0.97:
+                    crop_x0, crop_y0, crop_x1, crop_y1 = cx0, cy0, cx1, cy1
+
+        out_w = round(crop_x1 - crop_x0, 2)
+        out_h = round(crop_y1 - crop_y0, 2)
+        trimmed = (crop_x0 > 0.5 or crop_y0 > 0.5 or abs(out_w - max_w) > 1.0 or abs(out_h - max_h) > 1.0)
+
         normalized: list[bytes] = []
-        for blob, sz in zip(pdf_blobs, rects):
+        for idx, (blob, sz) in enumerate(zip(pdf_blobs, rects)):
             if sz is None:
                 normalized.append(blob)
                 continue
             rw, rh = sz
-            if abs(rw - max_w) <= 1.0 and abs(rh - max_h) <= 1.0:
+            is_cover = (idx == single_indices[0])
+            # If the cover artwork is much smaller than the uniform book page (e.g. centered letterboxed cover),
+            # aspect-fit the cover artwork cleanly into the exact same (out_w x out_h) page size.
+            fit_cover = False
+            if is_cover and cover_bbox is not None:
+                cw = cover_bbox[2] - cover_bbox[0]
+                ch = cover_bbox[3] - cover_bbox[1]
+                if cw > 50 and ch > 50 and (cw < out_w * 0.86 or ch < out_h * 0.86):
+                    fit_cover = True
+
+            if not trimmed and not fit_cover and abs(rw - out_w) <= 1.0 and abs(rh - out_h) <= 1.0:
                 normalized.append(blob)
                 continue
+
             with pymupdf.open(stream=blob, filetype="pdf") as src_doc:
                 out_doc = pymupdf.open()
-                page = out_doc.new_page(width=max_w, height=max_h)
-                x0 = (max_w - rw) / 2.0
-                y0 = (max_h - rh) / 2.0
-                page.show_pdf_page(
-                    pymupdf.Rect(x0, y0, x0 + rw, y0 + rh),
-                    src_doc,
-                    0,
-                )
+                page = out_doc.new_page(width=out_w, height=out_h)
+                if fit_cover and cover_bbox is not None:
+                    ox = (max_w - rw) / 2.0
+                    oy = (max_h - rh) / 2.0
+                    src_clip = pymupdf.Rect(
+                        max(0.0, cover_bbox[0] - ox),
+                        max(0.0, cover_bbox[1] - oy),
+                        min(rw, cover_bbox[2] - ox),
+                        min(rh, cover_bbox[3] - oy),
+                    )
+                    scale = min(out_w / max(1.0, src_clip.width), out_h / max(1.0, src_clip.height))
+                    dw = src_clip.width * scale
+                    dh = src_clip.height * scale
+                    dx = (out_w - dw) / 2.0
+                    dy = (out_h - dh) / 2.0
+                    page.show_pdf_page(
+                        pymupdf.Rect(dx, dy, dx + dw, dy + dh),
+                        src_doc,
+                        0,
+                        clip=src_clip,
+                    )
+                else:
+                    ox = (max_w - rw) / 2.0
+                    oy = (max_h - rh) / 2.0
+                    # Map uniform canvas crop_rect back to source page coordinates.
+                    src_x0 = max(0.0, crop_x0 - ox)
+                    src_y0 = max(0.0, crop_y0 - oy)
+                    src_x1 = min(rw, crop_x1 - ox)
+                    src_y1 = min(rh, crop_y1 - oy)
+                    dest_x0 = (ox + src_x0) - crop_x0
+                    dest_y0 = (oy + src_y0) - crop_y0
+                    dest_x1 = (ox + src_x1) - crop_x0
+                    dest_y1 = (oy + src_y1) - crop_y0
+                    page.show_pdf_page(
+                        pymupdf.Rect(dest_x0, dest_y0, dest_x1, dest_y1),
+                        src_doc,
+                        0,
+                        clip=pymupdf.Rect(src_x0, src_y0, src_x1, src_y1),
+                    )
                 normalized.append(out_doc.tobytes())
                 out_doc.close()
         return normalized
