@@ -3875,7 +3875,8 @@ struct ContentView: View {
                                 if item.status == .running {
                                     if let pages = model.activeFetchCapturedPages {
                                         if let total = model.activeFetchExpectedPages, total > 0 {
-                                            Text(model.t("取得中: \(pages) / \(total) ページ", "Downloading: \(pages) / \(total) pages"))
+                                            let pct = min(100, Int((Double(pages) / Double(total) * 100.0).rounded()))
+                                            Text(model.t("取得中: \(pages) / \(total) (\(pct)%)", "Downloading: \(pages) / \(total) (\(pct)%)"))
                                                 .font(.caption2.monospacedDigit().weight(.medium))
                                                 .foregroundStyle(.blue)
                                         } else {
@@ -4822,12 +4823,13 @@ struct ContentView: View {
                             if isActiveJobRunning {
                                 if let pages = model.activeFetchCapturedPages {
                                     if let total = model.activeFetchExpectedPages, total > 0 {
-                                        Text(model.t("取得済み: \(pages) / \(total) ページ", "Captured: \(pages) / \(total) page(s)"))
-                                            .font(.caption)
+                                        let pct = min(100, Int((Double(pages) / Double(total) * 100.0).rounded()))
+                                        Text(model.t("進捗: \(pages) / \(total) (\(pct)%)", "Progress: \(pages) / \(total) (\(pct)%)"))
+                                            .font(.caption.monospacedDigit())
                                             .foregroundStyle(.secondary)
                                     } else {
                                         Text(model.t("取得済み: \(pages) ページ", "Captured: \(pages) page(s)"))
-                                            .font(.caption)
+                                            .font(.caption.monospacedDigit())
                                             .foregroundStyle(.secondary)
                                     }
                                 } else if model.progressText != "推定中" && model.progressText != "-" {

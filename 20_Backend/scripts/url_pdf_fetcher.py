@@ -3377,7 +3377,7 @@ def fetch_via_browser(
                         if reader_mode:
                             if is_reader_oops(page):
                                 break
-                            retry_capture = capture_reader_page_as_pdf_bytes(page)
+                            retry_capture = capture_reader_page_as_pdf_bytes(page, scale_factor=scale_factor)
                             if retry_capture is not None:
                                 page_pdf_bytes, reader_png = retry_capture
                             else:
@@ -3402,7 +3402,7 @@ def fetch_via_browser(
                         if reader_mode:
                             if is_reader_oops(page):
                                 break
-                            retry_capture = capture_reader_page_as_pdf_bytes(page)
+                            retry_capture = capture_reader_page_as_pdf_bytes(page, scale_factor=scale_factor)
                             if retry_capture is not None:
                                 page_pdf_bytes, reader_png = retry_capture
                             else:
@@ -3464,7 +3464,7 @@ def fetch_via_browser(
                                 page.wait_for_timeout(2000)
                             if is_reader_oops(page):
                                 break
-                            k_res_retry = capture_reader_page_as_pdf_bytes(page)
+                            k_res_retry = capture_reader_page_as_pdf_bytes(page, scale_factor=scale_factor)
                             if k_res_retry is not None:
                                 page_pdf_bytes, reader_png = k_res_retry
                             elif last_reader_image_hash is None:
@@ -3503,12 +3503,13 @@ def fetch_via_browser(
                     k_total = get_reader_total_pages(page)
                     if k_total is not None:
                         expected_total_pages = k_total
-                    if expected_total_pages is not None:
-                        log(f"READER_PROGRESS={page_idx}/{expected_total_pages}")
                     last_reader_page = marker[1] if marker else None
                     k_pct = get_reader_progress_percent(page)
                     if k_pct is not None:
                         last_reader_percent = k_pct
+                    if expected_total_pages is not None:
+                        progress_current = last_reader_page if last_reader_page is not None else page_idx
+                        log(f"READER_PROGRESS={progress_current}/{expected_total_pages}")
                     if reader_checkpoint is not None:
                         reader_checkpoint.append(page_idx, ReaderCapture(
                             page_pdf_bytes, last_reader_page, last_reader_image_hash,
