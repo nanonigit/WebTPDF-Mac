@@ -721,17 +721,25 @@ def dismiss_reader_dialogs(page) -> bool:
     Returns True if a 'Most Recent Page Read' prompt was dismissed.
     """
     try:
-        body_text = (page.inner_text("body") or "").lower()
+        body_text = (page.inner_text("body", timeout=2000) or "").lower()
         is_recent_prompt = (
             "most recent page read" in body_text
             or "most recent page" in body_text
             or "最後に読んだページ" in body_text
         )
-        no_btn = page.locator("button:has-text('No'), button:has-text('いいえ')").first
-        if no_btn.count() > 0 and no_btn.is_visible():
-            no_btn.click(timeout=1500)
-            page.wait_for_timeout(400)
-            return is_recent_prompt
+        no_pattern = re.compile(r"^(?:No|いいえ)$", re.I)
+        candidates = [
+            page.get_by_role("button", name=no_pattern).filter(visible=True).first,
+            page.locator("button:has-text('No'), button:has-text('いいえ'), ion-button:has-text('No'), ion-button:has-text('いいえ'), [role='button']:has-text('No'), [role='button']:has-text('いいえ')").filter(visible=True).first,
+        ]
+        for no_btn in candidates:
+            try:
+                if no_btn.count() > 0 and no_btn.is_visible():
+                    no_btn.click(timeout=1500)
+                    page.wait_for_timeout(400)
+                    return is_recent_prompt
+            except Exception:
+                continue
     except Exception:
         pass
     return False
@@ -2731,10 +2739,12 @@ def fetch_via_browser(
                         continue
                     if page_idx == 1 and recovery_attempts == 0:
                         _wait_for_reader_reader(page, timeout_ms=15000)
+                        dismiss_reader_dialogs(page)
                         if is_reader_oops(page):
                             continue
                         if is_reader_not_at_start(page):
                             rewind_reader_to_start(page, turn_key)
+                            dismiss_reader_dialogs(page)
                         if is_reader_oops(page):
                             continue
                 else:
