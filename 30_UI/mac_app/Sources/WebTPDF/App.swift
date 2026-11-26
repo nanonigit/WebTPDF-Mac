@@ -2841,11 +2841,18 @@ final class AppModel: ObservableObject {
         fetchOutputRemainder = Data(fetchOutputRemainder[fetchOutputRemainder.index(after: end)...])
 
         let prefix = "READER_UNVERIFIED_GAPS="
+        let progPrefix = "READER_PROGRESS="
         var log = ""
         for line in output.split(separator: "\n", omittingEmptySubsequences: false).dropLast() {
             let lineStr = String(line)
             if lineStr.hasPrefix(prefix), let count = Int(lineStr.dropFirst(prefix.count)), count >= 0 {
                 readerVerificationProgress = ReaderVerificationProgress(url: url, direction: direction, unchecked: count)
+            } else if lineStr.hasPrefix(progPrefix) {
+                let parts = lineStr.dropFirst(progPrefix.count).split(separator: "/")
+                if parts.count == 2, let cur = Int(parts[0]), let tot = Int(parts[1]), tot > 0 {
+                    activeFetchCapturedPages = cur
+                    activeFetchExpectedPages = tot
+                }
             } else {
                 if let range = lineStr.range(of: "[AutoName] Output filename -> ") {
                     let filename = String(lineStr[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4559,9 +4566,15 @@ struct ContentView: View {
                         HStack(spacing: 12) {
                             if isActiveJobRunning {
                                 if let pages = model.activeFetchCapturedPages {
-                                    Text(model.t("取得済み: \(pages) ページ", "Captured: \(pages) page(s)"))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                    if let total = model.activeFetchExpectedPages, total > 0 {
+                                        Text(model.t("取得済み: \(pages) / \(total) ページ", "Captured: \(pages) / \(total) page(s)"))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Text(model.t("取得済み: \(pages) ページ", "Captured: \(pages) page(s)"))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 } else if model.progressText != "推定中" && model.progressText != "-" {
                                     Text(model.t("進捗: \(model.progressText)", "Progress: \(model.progressText)"))
                                         .font(.caption)

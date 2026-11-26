@@ -834,15 +834,18 @@ def get_reader_page_number(page) -> int | None:
 
 
 def get_reader_total_pages(page) -> int | None:
-    """Extract total page count from paginated ebook reader footer when available."""
+    """Extract total page or location count from paginated ebook reader footer when available."""
     try:
         body_text = page.inner_text("body", timeout=1000) or ""
-        m = re.search(r"Page\s+\d+\s+of\s+(\d+)", body_text, re.IGNORECASE)
+        m = re.search(r"Page\s+\d[\d,]*\s+of\s+(\d[\d,]*)", body_text, re.IGNORECASE)
         if m:
-            return int(m.group(1))
-        m_ja = re.search(r"(\d+)\s*ページ中\s*\d+\s*ページ", body_text)
+            return int(m.group(1).replace(",", ""))
+        m_ja = re.search(r"(\d[\d,]*)\s*ページ中\s*\d[\d,]*\s*ページ", body_text)
         if m_ja:
-            return int(m_ja.group(1))
+            return int(m_ja.group(1).replace(",", ""))
+        m_loc = re.search(r"Location\s+\d[\d,]*\s+of\s+(\d[\d,]*)", body_text, re.IGNORECASE)
+        if m_loc:
+            return int(m_loc.group(1).replace(",", ""))
     except Exception:
         pass
     return None
@@ -1569,8 +1572,13 @@ def recover_reader_oops(
                     matches_image = hashlib.sha256(frame).hexdigest() == last_image_hash
                     if (
                         not matches_image and last_pdf is not None
-                        and marker is not None and marker[0] == expected_position_kind
-                        and position == last_reader_page
+                        and (
+                            last_reader_page is None
+                            or (
+                                marker is not None and marker[0] == expected_position_kind
+                                and position == last_reader_page
+                            )
+                        )
                     ):
                         matches_image = matches_saved_reader_image(frame, last_pdf)
                         if matches_image:
@@ -2352,6 +2360,8 @@ def fetch_via_browser(
             restored_skipped_steps = 0
             if saved_pages:
                 log(f"[Reader] Loaded {len(saved_pages)} saved page(s); resuming capture.")
+                if saved_pages[-1].total is not None:
+                    log(f"READER_PROGRESS={len(saved_pages)}/{saved_pages[-1].total}")
                 if reader_mode and saved_pages[-1].viewport_height is not None:
                     page.set_viewport_size({"width": _infer_saved_viewport_width(saved_pages), "height": saved_pages[-1].viewport_height})
                 elif not reader_mode and reader_checkpoint is not None:
@@ -2839,9 +2849,9 @@ def fetch_via_browser(
                     k_total = get_reader_total_pages(page)
                     if k_total is not None:
                         expected_total_pages = k_total
-                    last_reader_page = marker[1] if marker and (
-                        marker[0] == "page" or expected_total_pages is None
-                    ) else None
+                    if expected_total_pages is not None:
+                        log(f"READER_PROGRESS={page_idx}/{expected_total_pages}")
+                    last_reader_page = marker[1] if marker else None
                     k_pct = get_reader_progress_percent(page)
                     if k_pct is not None:
                         last_reader_percent = k_pct
