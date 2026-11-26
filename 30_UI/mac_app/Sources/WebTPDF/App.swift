@@ -4505,6 +4505,7 @@ struct ContentView: View {
     }
 
     private var dashboardActiveJobSection: some View {
+        let isActiveJobRunning = model.isRunning && !model.isUpdatingApp
         let runningQueueItem = model.pdfQueue.first(where: { $0.status == .running })
         let pendingCount = model.pdfQueue.filter { $0.status == .pending }.count
         let bookName: String = {
@@ -4520,7 +4521,7 @@ struct ContentView: View {
         return GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
-                    if model.isRunning {
+                    if isActiveJobRunning {
                         ProgressView()
                             .controlSize(.small)
                     } else {
@@ -4529,13 +4530,13 @@ struct ContentView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(model.isRunning ? model.t("実行中: \(bookName)", "Running: \(bookName)") : model.t("現在実行中の処理はありません", "No active task"))
+                        Text(isActiveJobRunning ? model.t("実行中: \(bookName)", "Running: \(bookName)") : model.t("現在実行中の処理はありません", "No active task"))
                             .font(.callout.weight(.semibold))
                             .lineLimit(1)
                             .truncationMode(.middle)
 
                         HStack(spacing: 12) {
-                            if model.isRunning {
+                            if isActiveJobRunning {
                                 if let pages = model.activeFetchCapturedPages {
                                     Text(model.t("取得済み: \(pages) ページ", "Captured: \(pages) page(s)"))
                                         .font(.caption)
@@ -4559,13 +4560,13 @@ struct ContentView: View {
 
                     Spacer()
 
-                    if model.isRunning {
+                    if isActiveJobRunning {
                         Button(model.t("停止", "Stop"), role: .destructive) {
                             model.cancelJob()
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.red)
-                    } else if pendingCount > 0 {
+                    } else if pendingCount > 0 && !model.isUpdatingApp {
                         Button(model.t("キューを実行", "Run Queue")) {
                             model.startQueue()
                         }
@@ -4574,7 +4575,7 @@ struct ContentView: View {
                     }
                 }
 
-                if model.isRunning, let fraction = model.progressFraction {
+                if isActiveJobRunning, let fraction = model.progressFraction {
                     ProgressView(value: min(max(fraction, 0), 1))
                 }
             }
