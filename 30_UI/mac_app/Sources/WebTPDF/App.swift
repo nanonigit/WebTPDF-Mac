@@ -3595,72 +3595,6 @@ struct ContentView: View {
     private var urlToPDFView: some View {
         VisibleScrollView {
             VStack(alignment: .leading, spacing: 24) {
-
-                HStack(spacing: 10) {
-                    let urlMissing = model.trimmedSourceURL.isEmpty
-                    Button {
-                        isSourceURLFocused = true
-                    } label: {
-                        topologyCard(
-                            model.t("① ソースURL", "① Source URL"),
-                            symbol: "globe",
-                            detail: urlMissing ? model.t("未入力", "Empty") : model.t("入力済み", "Ready"),
-                            state: urlMissing ? .needsInput : .ready
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.t("クリックしてURL入力欄にカーソルを移動", "Click to focus URL input"))
-
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-
-                    Button {
-                        model.pageTurnDirection = model.pageTurnDirection == .left ? .right : .left
-                    } label: {
-                        topologyCard(
-                            model.t("② ページ送り", "② Pagination"),
-                            symbol: model.pageTurnDirection == .left ? "arrow.left.square" : "arrow.right.square",
-                            detail: model.pageTurnDirection.label(model.uiLanguage),
-                            state: .ready
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.t("クリックして右キー・左キーを切り替え", "Click to toggle Left/Right key"))
-
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-
-                    Button {
-                        model.choosePDFSaveDirectory()
-                    } label: {
-                        topologyCard(
-                            model.t("③ 保存先", "③ Save To"),
-                            symbol: "folder",
-                            detail: model.fetchedPDFRoot.lastPathComponent,
-                            state: .ready
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.t("クリックして保存先フォルダを変更", "Click to choose save folder"))
-
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-
-                    Button {
-                        model.fetchPDFfromURL()
-                    } label: {
-                        topologyCard(
-                            model.t("④ PDF保存 / キュー", "④ Save / Queue"),
-                            symbol: "arrow.down.doc.fill",
-                            detail: model.canFetchURL ? model.t("クリックで開始", "Click to Start") : model.t("①〜③を設定してください", "Complete ①–③"),
-                            state: model.canFetchURL ? .actionReady : .disabled
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!model.canFetchURL)
-                    .help(model.t("クリックしてPDF保存を実行", "Click to create PDF"))
-                }
-                .padding(20)
-                .frame(maxWidth: .infinity)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-
                 GroupBox(model.t("URL取得設定", "Capture Settings")) {
                     VStack(alignment: .leading, spacing: 14) {
                         VStack(alignment: .leading, spacing: 6) {
@@ -4829,12 +4763,12 @@ struct ContentView: View {
                                     if let total = model.activeFetchExpectedPages, total > 0 {
                                         let pct = min(100, Int((Double(pages) / Double(total) * 100.0).rounded()))
                                         Text(model.t("進捗: \(pages) / \(total) (\(pct)%)", "Progress: \(pages) / \(total) (\(pct)%)"))
-                                            .font(.caption.monospacedDigit())
-                                            .foregroundStyle(.secondary)
+                                            .font(.caption.monospacedDigit().weight(.semibold))
+                                            .foregroundStyle(pct >= 100 ? Color.green : Color.cyan)
                                     } else {
                                         Text(model.t("取得済み: \(pages) ページ", "Captured: \(pages) page(s)"))
-                                            .font(.caption.monospacedDigit())
-                                            .foregroundStyle(.secondary)
+                                            .font(.caption.monospacedDigit().weight(.semibold))
+                                            .foregroundStyle(.cyan)
                                     }
                                 } else if model.progressText != "推定中" && model.progressText != "-" {
                                     Text(model.t("進捗: \(model.progressText)", "Progress: \(model.progressText)"))
