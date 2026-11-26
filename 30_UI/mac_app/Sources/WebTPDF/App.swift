@@ -1402,10 +1402,23 @@ final class AppModel: ObservableObject {
     }
 
     func activeHistoryQueueStatus(_ entry: URLFetchHistoryItem) -> PDFQueueItem.Status? {
-        pdfQueue.first {
-            $0.url == entry.url && $0.direction == entry.direction
+        let key = normalizedDuplicateKey(entry.url)
+        return pdfQueue.first {
+            normalizedDuplicateKey($0.url) == key && $0.direction == entry.direction
                 && ($0.status == .pending || $0.status == .running)
         }?.status
+    }
+
+    func cancelPendingRedownload(for entry: URLFetchHistoryItem) {
+        let key = normalizedDuplicateKey(entry.url)
+        pdfQueue.removeAll {
+            normalizedDuplicateKey($0.url) == key && $0.direction == entry.direction && $0.status == .pending
+        }
+        let totalPages = max(1, (pdfQueue.count + 4) / 5)
+        if queuePageIndex >= totalPages {
+            queuePageIndex = max(0, totalPages - 1)
+        }
+        statusMessage = t("再ダウンロード予約を取り消しました", "Canceled queued re-download")
     }
 
     func remainingReaderIntervals(for entry: URLFetchHistoryItem) -> Int? {
@@ -4073,19 +4086,28 @@ struct ContentView: View {
                                 }
                             }
 
-                            let retryButton = Button(
-                                isFetchingEntry ? model.t("取得中…", "Fetching…")
-                                : model.t("再ダウンロード", "Re-download")
-                            ) {
-                                model.redownloadFromHistory(entry)
-                            }
-                            .disabled(isFetchingEntry)
-                            if entry.hasWarning && !isFetchingEntry {
-                                retryButton
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(.orange)
+                            if isFetchingEntry {
+                                Button(model.t("取得中…", "Fetching…")) {}
+                                    .buttonStyle(.bordered)
+                                    .disabled(true)
+                            } else if queueStatus == .pending {
+                                Button(model.t("再DLを中止", "Cancel Re-DL")) {
+                                    model.cancelPendingRedownload(for: entry)
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.red)
+                                .help(model.t("キューに登録された再ダウンロード予約を取り消します", "Remove this queued re-download from the queue"))
                             } else {
-                                retryButton.buttonStyle(.bordered)
+                                let retryButton = Button(model.t("再ダウンロード", "Re-download")) {
+                                    model.redownloadFromHistory(entry)
+                                }
+                                if entry.hasWarning {
+                                    retryButton
+                                        .buttonStyle(.borderedProminent)
+                                        .tint(.orange)
+                                } else {
+                                    retryButton.buttonStyle(.bordered)
+                                }
                             }
 
                             Button {
