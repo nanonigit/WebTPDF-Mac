@@ -3811,6 +3811,10 @@ struct ContentView: View {
     }
 
     private var fetchHistorySection: some View {
+        fetchHistorySectionView(showHeaderTitle: true)
+    }
+
+    private func fetchHistorySectionView(showHeaderTitle: Bool) -> some View {
         let pageSize = 5
         let filteredHistory = model.sortedFilteredHistory()
         let totalCount = filteredHistory.count
@@ -3861,6 +3865,13 @@ struct ContentView: View {
                             .buttonStyle(.borderedProminent)
                             .tint(.orange)
                             .disabled(model.isRunning)
+                        }
+
+                        if !showHeaderTitle {
+                            Button(model.t("履歴を全消去", "Clear All History")) {
+                                model.clearURLFetchHistory()
+                            }
+                            .disabled(model.urlFetchHistory.isEmpty)
                         }
                     }
                     .padding(.bottom, 4)
@@ -4062,13 +4073,15 @@ struct ContentView: View {
             }
             .padding(8)
         } label: {
-            HStack {
-                Text(model.t("取得履歴 (\(totalCount)件)", "Fetch History (\(totalCount))"))
-                Spacer()
-                Button(model.t("履歴を全消去", "Clear All History")) {
-                    model.clearURLFetchHistory()
+            if showHeaderTitle {
+                HStack {
+                    Text(model.t("取得履歴 (\(totalCount)件)", "Fetch History (\(totalCount))"))
+                    Spacer()
+                    Button(model.t("履歴を全消去", "Clear All History")) {
+                        model.clearURLFetchHistory()
+                    }
+                    .disabled(model.urlFetchHistory.isEmpty)
                 }
-                .disabled(model.urlFetchHistory.isEmpty)
             }
         }
     }
@@ -4411,7 +4424,9 @@ struct ContentView: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .frame(width: 12)
-                        Text(sectionID.title(model.uiLanguage))
+                        Text(sectionID == .history
+                             ? model.t("取得履歴 (\(model.sortedFilteredHistory().count)件)", "Fetch History (\(model.sortedFilteredHistory().count))")
+                             : sectionID.title(model.uiLanguage))
                             .font(.subheadline.weight(.semibold))
                     }
                 }
@@ -4447,11 +4462,11 @@ struct ContentView: View {
                 case .activeJob:
                     dashboardActiveJobSection
                 case .history:
-                    fetchHistorySection
+                    fetchHistorySectionView(showHeaderTitle: false)
                 case .runtime:
                     dashboardRuntimeBox
                 case .log:
-                    logBox(minHeight: 160)
+                    logBox(minHeight: 160, showTitle: false)
                 }
             }
         }
@@ -4470,7 +4485,7 @@ struct ContentView: View {
             return model.activeOperationLabel ?? model.t("待機中", "Idle")
         }()
 
-        return GroupBox(model.t("現在の作業状況・キュー進捗", "Active Job & Queue Progress")) {
+        return GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
                     if model.isRunning {
@@ -4734,8 +4749,6 @@ struct ContentView: View {
                 }
             }
             .padding(8)
-        } label: {
-            Text(model.t("実行環境の準備状況", "Runtime Environment"))
         }
     }
 
@@ -5198,8 +5211,8 @@ struct ContentView: View {
         }
     }
 
-    private func logBox(minHeight: CGFloat) -> some View {
-        GroupBox(model.t("ログ", "Log")) {
+    private func logBox(minHeight: CGFloat, showTitle: Bool = true) -> some View {
+        GroupBox {
             ScrollViewReader { proxy in
                 VisibleScrollView {
                     VStack(alignment: .leading, spacing: 0) {
@@ -5217,6 +5230,10 @@ struct ContentView: View {
                 .onChange(of: model.logText) { _, _ in
                     proxy.scrollTo("log-bottom", anchor: .bottom)
                 }
+            }
+        } label: {
+            if showTitle {
+                Text(model.t("ログ", "Log"))
             }
         }
     }
