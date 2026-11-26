@@ -463,6 +463,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var libraryPDFWarnings: [String: Int] = [:]
     @Published var queuePageIndex: Int = 0
     @Published var queueSortOrder: QueueSortOrder = .newestFirst
+    @Published var historySortOrder: QueueSortOrder = .newestFirst
+    @Published var historyErrorsOnly: Bool = false
     @Published private(set) var activeFetchBookTitle: String?
     @Published private(set) var activeFetchCapturedPages: Int?
     @Published private(set) var activeFetchExpectedPages: Int?
@@ -1113,7 +1115,7 @@ final class AppModel: ObservableObject {
         let beforeCount = pdfQueue.count
         pdfQueue.removeAll { !keepIDs.contains($0.id) }
         let removed = beforeCount - pdfQueue.count
-        let totalPages = max(1, (pdfQueue.count + 9) / 10)
+        let totalPages = max(1, (pdfQueue.count + 4) / 5)
         if queuePageIndex >= totalPages {
             queuePageIndex = max(0, totalPages - 1)
         }
@@ -1124,9 +1126,27 @@ final class AppModel: ObservableObject {
 
     func clearFinishedQueueItems() {
         pdfQueue.removeAll { $0.status == .completed || $0.status == .failed }
-        let totalPages = max(1, (pdfQueue.count + 9) / 10)
+        let totalPages = max(1, (pdfQueue.count + 4) / 5)
         if queuePageIndex >= totalPages {
             queuePageIndex = max(0, totalPages - 1)
+        }
+    }
+
+    func sortedFilteredHistory() -> [URLFetchHistoryItem] {
+        let base = historyErrorsOnly ? warningHistoryItems : urlFetchHistory
+        switch historySortOrder {
+        case .newestFirst:
+            return base
+        case .oldestFirst:
+            return base.reversed()
+        case .byName:
+            return base.sorted { lhs, rhs in
+                let cmp = lhs.displayTitle.localizedStandardCompare(rhs.displayTitle)
+                if cmp != .orderedSame {
+                    return cmp == .orderedAscending
+                }
+                return lhs.timestamp > rhs.timestamp
+            }
         }
     }
 
@@ -1353,7 +1373,7 @@ final class AppModel: ObservableObject {
 
     func removeURLFetchHistoryItem(_ id: UUID) {
         urlFetchHistory.removeAll { $0.id == id }
-        let totalPages = max(1, (urlFetchHistory.count + 9) / 10)
+        let totalPages = max(1, (urlFetchHistory.count + 4) / 5)
         if historyPageIndex >= totalPages {
             historyPageIndex = max(0, totalPages - 1)
         }
@@ -3515,7 +3535,7 @@ struct ContentView: View {
     }
 
     private var queueSection: some View {
-        let pageSize = 10
+        let pageSize = 5
         let orderedIndices = model.sortedQueueIndices()
         let totalCount = orderedIndices.count
         let totalPages = max(1, (totalCount + pageSize - 1) / pageSize)
@@ -3552,8 +3572,13 @@ struct ContentView: View {
                     ForEach(Array(pageIndices.enumerated()), id: \.element) { pos, index in
                         let item = model.pdfQueue[index]
                         HStack(spacing: 10) {
-                            Image(systemName: queueStatusSymbol(item.status))
-                                .foregroundStyle(queueStatusColor(item.status))
+                            if item.status == .running {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: queueStatusSymbol(item.status))
+                                    .foregroundStyle(queueStatusColor(item.status))
+                            }
 
                             VStack(alignment: .leading, spacing: 2) {
                                 if let title = model.queueDisplayTitle(for: item) {
@@ -3715,18 +3740,67 @@ struct ContentView: View {
     }
 
     private var fetchHistorySection: some View {
-        let pageSize = 10
-        let totalCount = model.urlFetchHistory.count
+        let pageSize = 5
+        let filteredHistory = model.sortedFilteredHistory()
+        let totalCount = filteredHistory.count
         let totalPages = max(1, (totalCount + pageSize - 1) / pageSize)
         let currentPage = min(max(0, model.historyPageIndex), totalPages - 1)
         let startIdx = currentPage * pageSize
         let endIdx = min(totalCount, startIdx + pageSize)
-        let pageEntries = startIdx < endIdx ? Array(model.urlFetchHistory[startIdx..<endIdx]) : []
+        let pageEntries = startIdx < endIdx ? Array(filteredHistory[startIdx..<endIdx]) : []
+        let warningCount = model.warningHistoryItems.count
 
         return GroupBox {
             VStack(alignment: .leading, spacing: 8) {
+                if !model.urlFetchHistory.isEmpty {
+                    HStack(spacing: 10) {
+                        Text(model.t("並び順", "Sort"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Picker(model.t("並び順", "Sort"), selection: $model.historySortOrder) {
+                            ForEach(AppModel.QueueSortOrder.allCases) { order in
+                                Text(order.label(model.uiLanguage)).tag(order)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: 260)
+                        .onChange(of: model.historySortOrder) { _, _ in
+                            model.historyPageIndex = 0
+                        }
+
+                        Spacer()
+
+                        Button {
+                            model.historyErrorsOnly.toggle()
+                            model.historyPageIndex = 0
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: model.historyErrorsOnly ? "exclamationmark.triangle.fill" : "line.3.horizontal.decrease.circle")
+                                Text(model.t("エラーのみ表示 (\(warningCount))", "Errors Only (\(warningCount))"))
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(model.historyErrorsOnly ? .orange : (warningCount > 0 ? .secondary : .gray))
+
+                        if warningCount > 0 {
+                            Button(model.t("エラーを一括再DL", "Re-download Errors")) {
+                                model.redownloadAllWarningHistoryItems()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                            .disabled(model.isRunning)
+                        }
+                    }
+                    .padding(.bottom, 4)
+                }
+
                 if pageEntries.isEmpty {
-                    Text(model.t("まだURL取得の履歴はありません。", "No URL fetch history yet."))
+                    Text(
+                        model.historyErrorsOnly
+                        ? model.t("エラー・要再ダウンロードの項目はありません。", "No errors or incomplete items.")
+                        : model.t("まだURL取得の履歴はありません。", "No URL fetch history yet.")
+                    )
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 4)
@@ -4245,8 +4319,6 @@ struct ContentView: View {
 
                 dashboardActiveJobSection
 
-                dashboardErrorHistorySection
-
                 fetchHistorySection
 
                 logBox(minHeight: 160)
@@ -4325,13 +4397,8 @@ struct ContentView: View {
                     }
                 }
 
-                if model.isRunning {
-                    if let fraction = model.progressFraction {
-                        ProgressView(value: min(max(fraction, 0), 1))
-                    } else {
-                        ProgressView()
-                            .progressViewStyle(.linear)
-                    }
+                if model.isRunning, let fraction = model.progressFraction {
+                    ProgressView(value: min(max(fraction, 0), 1))
                 }
             }
             .padding(8)
