@@ -752,16 +752,84 @@ def is_reader_not_at_start(page) -> bool:
     return False
 
 
-def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
-    """Jump to Location 1 via Go to Location when available, else step backwards to cover."""
+def jump_to_reader_toc_start(page) -> bool:
+    """Open the reader's TOC and jump to Cover / 表紙 or the very first TOC entry."""
+    previous_source = page.evaluate(READER_PAGE_SOURCE)
+    toggle = page.get_by_role("button", name=READER_TOC_NAME).or_(
+        page.locator("#kr-toc-button, #reader-toc-button, [data-testid='toc-button']")
+    )
+    clicked_button = None
+    for button in toggle.all():
+        if button.is_visible():
+            button.click(timeout=2000)
+            clicked_button = button
+            break
+    if clicked_button is None:
+        return False
+
+    heading = page.get_by_role("heading", name=READER_TOC_NAME).filter(visible=True).first
+    if not heading.count():
+        heading = page.get_by_text(READER_TOC_NAME, exact=True).filter(visible=True).last
     try:
-        if jump_to_reader_location(page, 1, prefer_page=False):
-            page.wait_for_timeout(500)
-            if not is_reader_not_at_start(page):
-                log("[Reader] Jumped to Location 1 via Go to Location.")
-                return
+        heading.wait_for(state="visible", timeout=2000)
+        panel = heading.locator("xpath=..")
+        entry_selector = "button, a, [role=option], [role=menuitem], [role=button], li[tabindex]"
+        for _ in range(4):
+            if panel.evaluate("node => node === document.body || node === document.documentElement"):
+                break
+            target_index = panel.evaluate("""(panel, {selector}) => {
+                const entries = [...panel.querySelectorAll(selector)];
+                const chapters = entries.filter(node =>
+                    node.getClientRects().length && node.textContent.trim() &&
+                    !node.querySelector(selector) && !node.disabled &&
+                    node.getAttribute('aria-disabled') !== 'true'
+                );
+                if (!chapters.length) return null;
+                const cover = chapters.find(node => /^(?:cover|表紙|beginning|先頭)$/i.test(node.textContent.trim()));
+                return entries.indexOf(cover || chapters[0]);
+            }""", {"selector": entry_selector})
+            if target_index is not None and target_index >= 0:
+                panel.locator(entry_selector).nth(target_index).click(timeout=3000)
+                heading.wait_for(state="hidden", timeout=2500)
+                wait_for_reader_turn(page, previous_source, timeout_ms=2500)
+                return True
+            panel = panel.locator("xpath=..")
+        return False
     except Exception:
-        pass
+        return False
+    finally:
+        try:
+            if heading.is_visible() and clicked_button.is_visible():
+                clicked_button.click(timeout=2000)
+        except Exception:
+            pass
+
+
+def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
+    """Jump to Location/Page 1 or TOC Cover when available, then step back any remaining pages to cover."""
+    jumped_by_nav = False
+    for prefer_page in (False, True):
+        try:
+            if seek_reader_position(page, 1, target_is_printed_page=prefer_page):
+                page.wait_for_timeout(500)
+                jumped_by_nav = True
+                log(f"[Reader] Jumped near start via {'Page' if prefer_page else 'Location'} 1.")
+                break
+        except Exception:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+    if not jumped_by_nav:
+        try:
+            if jump_to_reader_toc_start(page):
+                page.wait_for_timeout(500)
+                jumped_by_nav = True
+                log("[Reader] Jumped near start via Table of Contents.")
+        except Exception:
+            pass
+    if jumped_by_nav and not is_reader_not_at_start(page):
+        return
     reverse_key = "ArrowRight" if turn_key == "ArrowLeft" else "ArrowLeft"
     log(f"[Reader] Not at first page; rewinding to start via {reverse_key}...")
     unchanged = 0
