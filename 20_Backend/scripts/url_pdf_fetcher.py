@@ -1035,49 +1035,79 @@ def detect_reader_turn_direction(page, current_turn_key: str) -> str:
     return current_turn_key
 
 
-def _reveal_reader_toolbar(page) -> None:
-    """Click the center of the reader viewport to reveal hidden Kindle top/bottom toolbars and footer."""
+def _is_reader_toolbar_in_viewport(page) -> bool:
+    """Return True if Kindle's top toolbar (TOC / Reader menu) is currently slid into the viewport (y >= 0)."""
     try:
+        btn = page.get_by_role("button", name=READER_TOC_NAME).or_(
+            page.locator("ion-button[aria-label='Reader menu'], #kr-toc-button, #reader-toc-button, [data-testid='top_menu_navigation_menu']")
+        ).first
+        if btn.count() > 0:
+            box = btn.bounding_box(timeout=1000)
+            if box is not None:
+                return box.get("y", -1) >= 0
+    except Exception:
+        pass
+    return False
+
+
+def _reveal_reader_toolbar(page) -> None:
+    """Click the center of the reader viewport only when the top toolbar is slid off-screen (y < 0)."""
+    try:
+        if _is_reader_toolbar_in_viewport(page):
+            return
         vp = page.viewport_size
         cx = (vp["width"] / 2.0) if vp else 430.0
         cy = (vp["height"] / 2.0) if vp else 600.0
         page.mouse.click(cx, cy)
-        page.wait_for_timeout(450)
+        page.wait_for_timeout(500)
     except Exception:
         pass
 
 
 def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
-    """Jump to Location/Page 1 or TOC Cover when available, then step back any remaining pages to cover."""
-    if get_reader_position(page) is None:
-        _reveal_reader_toolbar(page)
+    """Jump to TOC Cover or Location/Page 1 when available, then step back any remaining pages to cover."""
+    _reveal_reader_toolbar(page)
     jumped_by_nav = False
-    for prefer_page in (False, True):
+    try:
+        toc_ok = jump_to_reader_toc_start(page)
+        page.wait_for_timeout(500)
+        pos_after_toc = get_reader_position(page)
+        pct_after_toc = get_reader_progress_percent(page)
+        if toc_ok or (pos_after_toc is not None and pos_after_toc[1] <= 3) or (pct_after_toc is not None and pct_after_toc == 0):
+            jumped_by_nav = True
+            log(f"[Reader] Jumped near start via Table of Contents (pos={pos_after_toc}, pct={pct_after_toc}).")
+    except Exception:
         try:
-            if seek_reader_position(page, 1, target_is_printed_page=prefer_page):
-                page.wait_for_timeout(500)
-                jumped_by_nav = True
-                log(f"[Reader] Jumped near start via {'Page' if prefer_page else 'Location'} 1.")
-                break
-        except Exception:
-            try:
-                page.keyboard.press("Escape")
-            except Exception:
-                pass
-    if not jumped_by_nav:
-        try:
-            if jump_to_reader_toc_start(page):
-                page.wait_for_timeout(500)
-                jumped_by_nav = True
-                log("[Reader] Jumped near start via Table of Contents.")
+            page.keyboard.press("Escape")
         except Exception:
             pass
+    if not jumped_by_nav:
+        _reveal_reader_toolbar(page)
+        for prefer_page in (False, True):
+            try:
+                if seek_reader_position(page, 1, target_is_printed_page=prefer_page):
+                    page.wait_for_timeout(500)
+                    jumped_by_nav = True
+                    log(f"[Reader] Jumped near start via {'Page' if prefer_page else 'Location'} 1.")
+                    break
+            except Exception:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
     if jumped_by_nav:
         pos_after = get_reader_position(page)
-        if pos_after is not None and pos_after[1] <= 1:
+        pct_after = get_reader_progress_percent(page)
+        if (pos_after is not None and pos_after[1] <= 1) or (pct_after is not None and pct_after == 0):
             return
         if pos_after is not None and not is_reader_not_at_start(page):
             return
+    # Ensure no toolbar menu/overlay is capturing arrow keys before stepping backwards.
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+    except Exception:
+        pass
     reverse_key = "ArrowRight" if turn_key == "ArrowLeft" else "ArrowLeft"
     log(f"[Reader] Not at first page; rewinding to start via {reverse_key}...")
     unchanged = 0
