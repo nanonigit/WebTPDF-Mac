@@ -77,43 +77,70 @@ def _find_horizontal_content_bands(im: Image.Image) -> list[tuple[int, int]]:
     return bands
 
 
-def _strip_reader_chrome_bands(
-    bands: list[tuple[int, int]],
-    page_height: int,
-) -> list[tuple[int, int]]:
-    """Remove top Kindle toolbar and bottom scrubber/Location bands when clearly separated."""
-    if len(bands) <= 1:
-        return bands
+def _detect_document_chrome_y_bounds(doc: fitz.Document) -> tuple[float | None, float | None]:
+    """Detect static Kindle Reader top/bottom chrome y-cutoffs only when present on both cover and interior pages."""
+    if len(doc) < 2:
+        return None, None
 
-    filtered = list(bands)
-    # Strip top toolbar band (thin bar near top separated by >= 12px gap)
-    if len(filtered) >= 2:
-        top_y0, top_y1 = filtered[0]
-        next_y0, _ = filtered[1]
-        if top_y1 <= page_height * 0.14 and (top_y1 - top_y0) <= 65 and (next_y0 - top_y1) >= 12:
-            filtered.pop(0)
+    sample_indices = [0, 1] + ([2] if len(doc) > 2 else [])
+    top_candidates: list[tuple[int, int, int]] = []
+    bot_candidates: list[tuple[int, int, int]] = []
 
-    # Strip bottom scrubber / Location bands (thin bars near bottom separated by >= 18px gap)
-    while len(filtered) >= 2:
-        bot_y0, bot_y1 = filtered[-1]
-        prev_y0, prev_y1 = filtered[-2]
-        if bot_y0 >= page_height * 0.80 and (bot_y1 - bot_y0) <= 50 and (bot_y0 - prev_y1) >= 15:
-            filtered.pop()
-        else:
-            break
-    return filtered
+    for idx in sample_indices:
+        pg = doc[idx]
+        pix = pg.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+        im = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        bands = _find_horizontal_content_bands(im)
+        if len(bands) < 2:
+            return None, None
+
+        h = pix.height
+        # Top thin band separated from main body
+        t0, t1 = bands[0]
+        n0, _ = bands[1]
+        if t1 <= h * 0.14 and (t1 - t0) <= 65 and (n0 - t1) >= 12:
+            top_candidates.append((t0, t1, h))
+
+        # Bottom thin bands separated from main body
+        b_idx = len(bands) - 1
+        while b_idx >= 1 and bands[b_idx][0] >= h * 0.80 and (bands[b_idx][1] - bands[b_idx][0]) <= 50:
+            b_idx -= 1
+        if b_idx < len(bands) - 1:
+            prev_end = bands[b_idx][1]
+            first_bot_y0 = bands[b_idx + 1][0]
+            if (first_bot_y0 - prev_end) >= 15:
+                bot_candidates.append((first_bot_y0, bands[-1][1], h))
+
+    top_cut: float | None = None
+    if len(top_candidates) == len(sample_indices):
+        # Static top toolbar must sit at nearly the same y across cover and interior pages
+        if max(t[1] for t in top_candidates) - min(t[1] for t in top_candidates) <= 15:
+            top_cut = float(max(t[1] for t in top_candidates) + 2)
+
+    bot_cut: float | None = None
+    if len(bot_candidates) == len(sample_indices):
+        # Bottom bar offset from bottom edge (h - y0) is consistent across pages
+        offsets = [b[2] - b[0] for b in bot_candidates]
+        if max(offsets) - min(offsets) <= 25:
+            # Store as distance from bottom edge? Return per-page check via ratio or absolute when same height
+            bot_cut = float(max(offsets) + 2)
+
+    return top_cut, bot_cut
 
 
-def _measure_page_content_rect(page: fitz.Page) -> fitz.Rect | None:
-    """Measure a page's non-white content rect (at 1x point scale) excluding reader chrome."""
+def _measure_page_content_rect(
+    page: fitz.Page,
+    top_chrome_cut: float | None = None,
+    bot_chrome_offset: float | None = None,
+) -> fitz.Rect | None:
+    """Measure a page's non-white content rect (at 1x point scale), excluding verified static chrome."""
     pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
     im = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    bands = _strip_reader_chrome_bands(_find_horizontal_content_bands(im), pix.height)
-    if not bands:
-        return None
+    y0 = int(top_chrome_cut) if top_chrome_cut is not None else 0
+    y1 = int(pix.height - bot_chrome_offset) if bot_chrome_offset is not None else pix.height
+    y0 = max(0, min(y0, pix.height - 20))
+    y1 = max(y0 + 20, min(y1, pix.height))
 
-    y0 = max(0, bands[0][0])
-    y1 = min(pix.height, bands[-1][1] + 1)
     cropped_y = im.crop((0, y0, pix.width, y1))
     bg = Image.new("RGB", cropped_y.size, (255, 255, 255))
     bbox = ImageChops.difference(cropped_y, bg).getbbox()
@@ -133,11 +160,12 @@ def _measure_page_content_rect(page: fitz.Page) -> fitz.Rect | None:
 
 
 def trim_pdf_to_cover(doc: fitz.Document) -> int:
-    """Trim margins and reader UI chrome across all pages using cover dimensions as baseline."""
+    """Trim margins and verified static reader chrome across all pages using cover dimensions as baseline."""
     if len(doc) == 0:
         return 0
 
-    cover_rect = _measure_page_content_rect(doc[0])
+    top_cut, bot_offset = _detect_document_chrome_y_bounds(doc)
+    cover_rect = _measure_page_content_rect(doc[0], top_cut, bot_offset)
     cover_w = cover_rect.width if cover_rect and cover_rect.width > 50 else None
     cover_h = cover_rect.height if cover_rect and cover_rect.height > 50 else None
 
@@ -145,7 +173,7 @@ def trim_pdf_to_cover(doc: fitz.Document) -> int:
     for idx in range(len(doc)):
         page = doc[idx]
         mb = page.mediabox
-        content = _measure_page_content_rect(page)
+        content = _measure_page_content_rect(page, top_cut, bot_offset)
         if content is None or content.width <= 20 or content.height <= 20:
             continue
 
