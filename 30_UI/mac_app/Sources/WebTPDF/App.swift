@@ -1103,7 +1103,7 @@ final class AppModel: ObservableObject {
             return
         }
 
-        pdfQueue.insert(PDFQueueItem(url: urlString, direction: pageTurnDirection), at: 0)
+        pdfQueue.insert(PDFQueueItem(url: urlString, direction: pageTurnDirection, aspectPreset: readerAspectPreset), at: 0)
         queuePageIndex = 0
         sourceURLText = ""
         isQueueAutoPaused = false
@@ -1538,8 +1538,8 @@ final class AppModel: ObservableObject {
                     && ($0.status == .pending || $0.status == .running)
             })
             if !alreadyQueued {
-                pdfQueue.insert(PDFQueueItem(url: item.url, direction: item.direction), at: 0)
-        queuePageIndex = 0
+                pdfQueue.insert(PDFQueueItem(url: item.url, direction: item.direction, bookTitle: item.bookTitle, aspectPreset: readerAspectPreset), at: 0)
+                queuePageIndex = 0
                 added += 1
             }
         }

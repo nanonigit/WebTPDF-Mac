@@ -1125,7 +1125,7 @@ def is_reader_oops(page) -> bool:
         back_btn = page.locator("button:has-text('Back to Library'), a:has-text('Back to Library')").first
         if back_btn.count() > 0 and back_btn.is_visible():
             return True
-        body_text = (page.inner_text("body") or "").lower()
+        body_text = (page.inner_text("body", timeout=1500) or "").lower()
         return "something went wrong" in body_text and "back to library" in body_text
     except Exception:
         return False
@@ -1191,9 +1191,14 @@ def inspect_reader_total_pages(url: str) -> int | None:
 
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(endpoint)
-        page = browser.contexts[0].new_page()
+        context = browser.contexts[0]
+        page = context.new_page()
+        page_target_id = _get_cdp_target_id(context, page)
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            _wait_for_reader_reader(page, timeout_ms=8000)
+            if get_reader_total_pages(page) is None:
+                _reveal_reader_toolbar(page)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if is_reader_oops(page):
@@ -1204,14 +1209,14 @@ def inspect_reader_total_pages(url: str) -> int | None:
                 page.wait_for_timeout(400)
             return None
         finally:
-            page.close()
+            _close_page_safely(page, endpoint, page_target_id)
 
 
 def get_reader_progress_percent(page) -> int | None:
     """Extract reading progress percentage (0-100) from paginated ebook reader footer."""
     try:
-        body_text = page.inner_text("body") or ""
-        m = re.search(r"●\s*(\d{1,3})%", body_text)
+        body_text = page.inner_text("body", timeout=1500) or ""
+        m = re.search(r"[●•]\s*(\d{1,3})%", body_text)
         if m:
             return int(m.group(1))
     except Exception:
