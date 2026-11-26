@@ -803,6 +803,50 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func normalizedDuplicateKey(_ rawURL: String) -> String {
+        let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, var comps = URLComponents(string: trimmed) else {
+            return trimmed.lowercased()
+        }
+        comps.fragment = nil
+        let host = (comps.host ?? "").lowercased()
+        if host.contains("read.amazon."),
+           let asin = comps.queryItems?.first(where: { $0.name.lowercased() == "asin" })?.value,
+           !asin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "kindle:\(asin.trimmingCharacters(in: .whitespacesAndNewlines).uppercased())"
+        }
+        var path = comps.path
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        comps.path = path
+        return (comps.string ?? trimmed).lowercased()
+    }
+
+    func duplicateNotices(for rawURL: String) -> [String] {
+        let key = normalizedDuplicateKey(rawURL)
+        guard !key.isEmpty else { return [] }
+        var notices: [String] = []
+        if let q = pdfQueue.first(where: { normalizedDuplicateKey($0.url) == key }) {
+            let statusText: String = switch q.status {
+            case .pending: t("待機中", "Pending")
+            case .running: t("実行中", "Running")
+            case .completed: t("完了", "Completed")
+            case .failed: t("エラー", "Failed")
+            }
+            notices.append(t("実行キューに登録済み（\(statusText)）", "Already in execution queue (\(statusText))"))
+        }
+        if let h = urlFetchHistory.first(where: { normalizedDuplicateKey($0.url) == key }) {
+            let name = h.outputPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+            if name.isEmpty {
+                notices.append(t("取得履歴に同じURLがあります", "Same URL exists in fetch history"))
+            } else {
+                notices.append(t("取得履歴に同じ書籍があります: \(name)", "Same book exists in fetch history: \(name)"))
+            }
+        }
+        return notices
+    }
+
     func enqueueCurrentURL() {
         let urlString = trimmedSourceURL
         guard !urlString.isEmpty else { return }
@@ -812,6 +856,14 @@ final class AppModel: ObservableObject {
               parsed.host != nil
         else {
             statusMessage = t("有効な http:// または https:// のURLを入力してください。", "Enter a valid http:// or https:// URL.")
+            return
+        }
+
+        let key = normalizedDuplicateKey(urlString)
+        if pdfQueue.contains(where: {
+            normalizedDuplicateKey($0.url) == key && ($0.status == .pending || $0.status == .running)
+        }) {
+            statusMessage = t("⚠️ 同じURL（書籍）がすでに実行キューにあります（重複のため追加しませんでした）", "⚠️ Same URL/book is already in the execution queue (duplicate skipped)")
             return
         }
 
@@ -3111,6 +3163,20 @@ struct ContentView: View {
                             TextField("https://... (PDF / URL)", text: $model.sourceURLText)
                                 .textFieldStyle(.roundedBorder)
                                 .focused($isSourceURLFocused)
+                            let dupNotices = model.duplicateNotices(for: model.trimmedSourceURL)
+                            if !dupNotices.isEmpty {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.orange)
+                                    Text(dupNotices.joined(separator: " / "))
+                                        .font(.caption)
+                                        .foregroundStyle(.orange)
+                                        .lineLimit(2)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                            }
                         }
 
                         HStack(spacing: 12) {
@@ -3226,6 +3292,27 @@ struct ContentView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+
+                            let itemKey = model.normalizedDuplicateKey(item.url)
+                            let queueDupCount = model.pdfQueue.filter { model.normalizedDuplicateKey($0.url) == itemKey }.count
+                            let matchedHistory = model.urlFetchHistory.first { model.normalizedDuplicateKey($0.url) == itemKey }
+                            if queueDupCount > 1 {
+                                Text(model.t("重複", "Duplicate"))
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange.opacity(0.18), in: Capsule())
+                                    .foregroundStyle(.orange)
+                            } else if let hist = matchedHistory, item.status == .pending {
+                                let histName = hist.outputPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+                                Text(model.t("履歴あり", "In History"))
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange.opacity(0.16), in: Capsule())
+                                    .foregroundStyle(.orange)
+                                    .help(histName.isEmpty ? hist.url : histName)
+                            }
 
                             Picker("", selection: $model.pdfQueue[index].direction) {
                                 ForEach(AppModel.PageTurnDirection.allCases) { dir in
