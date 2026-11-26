@@ -204,6 +204,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    enum QueueSortOrder: String, CaseIterable, Identifiable {
+        case newestFirst
+        case oldestFirst
+        case byName
+
+        var id: String { rawValue }
+
+        func label(_ lang: UILanguage) -> String {
+            switch self {
+            case .newestFirst: return lang == .ja ? "新しい順" : "Newest"
+            case .oldestFirst: return lang == .ja ? "古い順" : "Oldest"
+            case .byName: return lang == .ja ? "名前順" : "By Name"
+            }
+        }
+    }
+
     enum PDFCompressionPreset: String, CaseIterable, Identifiable {
         case light
         case balanced
@@ -433,6 +449,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var historyPageCountMessages: [UUID: String] = [:]
     @Published private(set) var libraryPDFWarnings: [String: Int] = [:]
     @Published var queuePageIndex: Int = 0
+    @Published var queueSortOrder: QueueSortOrder = .newestFirst
+    @Published private(set) var activeFetchBookTitle: String?
+    @Published private(set) var activeFetchCapturedPages: Int?
+    @Published private(set) var activeFetchExpectedPages: Int?
     @Published var historyPageIndex: Int = 0
     @Published var warningHistoryPageIndex: Int = 0
     @Published var isUpdatingApp: Bool = false
@@ -953,7 +973,8 @@ final class AppModel: ObservableObject {
             return
         }
 
-        pdfQueue.append(PDFQueueItem(url: urlString, direction: pageTurnDirection))
+        pdfQueue.insert(PDFQueueItem(url: urlString, direction: pageTurnDirection), at: 0)
+        queuePageIndex = 0
         sourceURLText = ""
         isQueueAutoPaused = false
         if !isRunning {
@@ -992,6 +1013,92 @@ final class AppModel: ObservableObject {
         let totalPages = max(1, (pdfQueue.count + 9) / 10)
         if queuePageIndex >= totalPages {
             queuePageIndex = max(0, totalPages - 1)
+        }
+    }
+
+    var hasDuplicateQueueItems: Bool {
+        var seen = Set<String>()
+        for item in pdfQueue {
+            let key = normalizedDuplicateKey(item.url)
+            if !seen.insert(key).inserted {
+                return true
+            }
+        }
+        return false
+    }
+
+    func queueDisplayTitle(for item: PDFQueueItem) -> String? {
+        if let out = item.outputURL {
+            return out.deletingPathExtension().lastPathComponent
+        }
+        let key = normalizedDuplicateKey(item.url)
+        if let hist = urlFetchHistory.first(where: { normalizedDuplicateKey($0.url) == key }),
+           let path = hist.outputPath, !path.isEmpty {
+            return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+        }
+        return nil
+    }
+
+    func sortedQueueIndices() -> [Int] {
+        let indices = Array(pdfQueue.indices)
+        switch queueSortOrder {
+        case .newestFirst:
+            return indices
+        case .oldestFirst:
+            return indices.reversed()
+        case .byName:
+            return indices.sorted { lhs, rhs in
+                let lItem = pdfQueue[lhs]
+                let rItem = pdfQueue[rhs]
+                let lLabel = queueDisplayTitle(for: lItem) ?? lItem.url
+                let rLabel = queueDisplayTitle(for: rItem) ?? rItem.url
+                let cmp = lLabel.localizedStandardCompare(rLabel)
+                if cmp != .orderedSame {
+                    return cmp == .orderedAscending
+                }
+                let lKey = normalizedDuplicateKey(lItem.url)
+                let rKey = normalizedDuplicateKey(rItem.url)
+                if lKey != rKey {
+                    return lKey < rKey
+                }
+                return lhs < rhs
+            }
+        }
+    }
+
+    func removeDuplicateQueueItems() {
+        guard !isRunning else { return }
+        func statusPriority(_ status: PDFQueueItem.Status) -> Int {
+            switch status {
+            case .running: return 0
+            case .pending: return 1
+            case .completed: return 2
+            case .failed: return 3
+            }
+        }
+        var bestByKey: [String: Int] = [:]
+        for idx in pdfQueue.indices {
+            let key = normalizedDuplicateKey(pdfQueue[idx].url)
+            if let existingIdx = bestByKey[key] {
+                let newPri = statusPriority(pdfQueue[idx].status)
+                let oldPri = statusPriority(pdfQueue[existingIdx].status)
+                if newPri < oldPri {
+                    bestByKey[key] = idx
+                }
+            } else {
+                bestByKey[key] = idx
+            }
+        }
+        let keepIDs = Set(bestByKey.values.map { pdfQueue[$0].id })
+        let beforeCount = pdfQueue.count
+        pdfQueue.removeAll { !keepIDs.contains($0.id) }
+        let removed = beforeCount - pdfQueue.count
+        let totalPages = max(1, (pdfQueue.count + 9) / 10)
+        if queuePageIndex >= totalPages {
+            queuePageIndex = max(0, totalPages - 1)
+        }
+        if removed > 0 {
+            statusMessage = t("重複していた \(removed) 件を整理しました", "Removed \(removed) duplicate item(s)")
         }
     }
 
@@ -1173,7 +1280,8 @@ final class AppModel: ObservableObject {
         }) else {
             return
         }
-        pdfQueue.append(PDFQueueItem(url: item.url, direction: item.direction))
+        pdfQueue.insert(PDFQueueItem(url: item.url, direction: item.direction), at: 0)
+        queuePageIndex = 0
         isQueueAutoPaused = false
         if !isRunning {
             statusMessage = t("履歴から再ダウンロードを開始しました", "Started re-download from history")
@@ -1199,7 +1307,8 @@ final class AppModel: ObservableObject {
                     && ($0.status == .pending || $0.status == .running)
             })
             if !alreadyQueued {
-                pdfQueue.append(PDFQueueItem(url: item.url, direction: item.direction))
+                pdfQueue.insert(PDFQueueItem(url: item.url, direction: item.direction), at: 0)
+        queuePageIndex = 0
                 added += 1
             }
         }
@@ -2520,6 +2629,9 @@ final class AppModel: ObservableObject {
                     }
                     self?.fetchOutputRemainder = Data()
                     self?.readerVerificationProgress = nil
+                    self?.activeFetchBookTitle = nil
+                    self?.activeFetchCapturedPages = nil
+                    self?.activeFetchExpectedPages = nil
                     self?.fetchProcess = nil
                     let result = (try? Data(contentsOf: resultURL)).flatMap {
                         try? JSONDecoder().decode(URLFetchResult.self, from: $0)
@@ -2571,10 +2683,23 @@ final class AppModel: ObservableObject {
         let prefix = "READER_UNVERIFIED_GAPS="
         var log = ""
         for line in output.split(separator: "\n", omittingEmptySubsequences: false).dropLast() {
-            if line.hasPrefix(prefix), let count = Int(line.dropFirst(prefix.count)), count >= 0 {
+            let lineStr = String(line)
+            if lineStr.hasPrefix(prefix), let count = Int(lineStr.dropFirst(prefix.count)), count >= 0 {
                 readerVerificationProgress = ReaderVerificationProgress(url: url, direction: direction, unchecked: count)
             } else {
-                log += line + "\n"
+                if let range = lineStr.range(of: "[AutoName] Output filename -> ") {
+                    let filename = String(lineStr[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !filename.isEmpty {
+                        activeFetchBookTitle = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+                    }
+                } else if lineStr.hasPrefix("[Browser] Captured page "),
+                          let num = Int(lineStr.dropFirst("[Browser] Captured page ".count).split(separator: " ").first ?? "") {
+                    activeFetchCapturedPages = num
+                } else if lineStr.hasPrefix("[Reader] Loaded "),
+                          let num = Int(lineStr.dropFirst("[Reader] Loaded ".count).split(separator: " ").first ?? "") {
+                    activeFetchCapturedPages = num
+                }
+                log += lineStr + "\n"
             }
         }
         if !log.isEmpty { appendLog(log) }
@@ -3352,32 +3477,59 @@ struct ContentView: View {
 
     private var queueSection: some View {
         let pageSize = 10
-        let totalCount = model.pdfQueue.count
+        let orderedIndices = model.sortedQueueIndices()
+        let totalCount = orderedIndices.count
         let totalPages = max(1, (totalCount + pageSize - 1) / pageSize)
         let currentPage = min(max(0, model.queuePageIndex), totalPages - 1)
         let startIdx = currentPage * pageSize
         let endIdx = min(totalCount, startIdx + pageSize)
-        let pageIndices = startIdx < endIdx ? Array(startIdx..<endIdx) : []
+        let pageIndices = startIdx < endIdx ? Array(orderedIndices[startIdx..<endIdx]) : []
 
         return GroupBox(model.t("実行キュー (\(model.pdfQueue.count)件)", "Execution Queue (\(model.pdfQueue.count))")) {
             VStack(alignment: .leading, spacing: 10) {
+                if !orderedIndices.isEmpty {
+                    HStack(spacing: 8) {
+                        Text(model.t("並び順", "Sort"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Picker(model.t("並び順", "Sort"), selection: $model.queueSortOrder) {
+                            ForEach(AppModel.QueueSortOrder.allCases) { order in
+                                Text(order.label(model.uiLanguage)).tag(order)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: 260)
+                        Spacer()
+                    }
+                }
+
                 if pageIndices.isEmpty {
                     Text(model.t("URLとページ送り方向（← / →）を選んで「＋ キューに追加」を押すと、順番に自動でPDF化できます。", "Choose a URL and arrow direction (← / →), then click '+ Add to Queue' to process them sequentially."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 4)
                 } else {
-                    ForEach(pageIndices, id: \.self) { index in
+                    ForEach(Array(pageIndices.enumerated()), id: \.element) { pos, index in
                         let item = model.pdfQueue[index]
                         HStack(spacing: 10) {
                             Image(systemName: queueStatusSymbol(item.status))
                                 .foregroundStyle(queueStatusColor(item.status))
 
-                            Text(item.url)
-                                .font(.caption)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 2) {
+                                if let title = model.queueDisplayTitle(for: item) {
+                                    Text(title)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Text(item.url)
+                                    .font(model.queueDisplayTitle(for: item) == nil ? .caption : .caption2)
+                                    .foregroundStyle(model.queueDisplayTitle(for: item) == nil ? .primary : .secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
                             let itemKey = model.normalizedDuplicateKey(item.url)
                             let queueDupCount = model.pdfQueue.filter { model.normalizedDuplicateKey($0.url) == itemKey }.count
@@ -3434,7 +3586,7 @@ struct ContentView: View {
                             .buttonStyle(.borderless)
                             .disabled(item.status == .running)
                         }
-                        if index < endIdx - 1 {
+                        if pos < pageIndices.count - 1 {
                             Divider()
                         }
                     }
@@ -3495,6 +3647,11 @@ struct ContentView: View {
                             model.clearFinishedQueueItems()
                         }
                         .disabled(model.isRunning)
+
+                        Button(model.t("重複を整理", "Remove Duplicates")) {
+                            model.removeDuplicateQueueItems()
+                        }
+                        .disabled(!model.hasDuplicateQueueItems || model.isRunning)
 
                         Spacer()
 
@@ -4031,6 +4188,8 @@ struct ContentView: View {
 
                 dashboardRuntimeBox
 
+                dashboardActiveJobSection
+
                 dashboardErrorHistorySection
 
                 fetchHistorySection
@@ -4038,6 +4197,86 @@ struct ContentView: View {
                 logBox(minHeight: 160)
             }
             .padding(28)
+        }
+    }
+
+    private var dashboardActiveJobSection: some View {
+        let runningQueueItem = model.pdfQueue.first(where: { $0.status == .running })
+        let pendingCount = model.pdfQueue.filter { $0.status == .pending }.count
+        let bookName: String = {
+            if let title = model.activeFetchBookTitle, !title.isEmpty {
+                return title
+            }
+            if let q = runningQueueItem {
+                return model.queueDisplayTitle(for: q) ?? q.url
+            }
+            return model.activeOperationLabel ?? model.t("待機中", "Idle")
+        }()
+
+        return GroupBox(model.t("現在の作業状況・キュー進捗", "Active Job & Queue Progress")) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    if model.isRunning {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: pendingCount > 0 ? "clock.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(pendingCount > 0 ? Color.orange : Color.green)
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.isRunning ? model.t("実行中: \(bookName)", "Running: \(bookName)") : model.t("現在実行中の処理はありません", "No active task"))
+                            .font(.callout.weight(.semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        HStack(spacing: 12) {
+                            if model.isRunning {
+                                if let pages = model.activeFetchCapturedPages {
+                                    Text(model.t("取得済み: \(pages) ページ", "Captured: \(pages) page(s)"))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Text(model.t("進捗: \(model.progressText)", "Progress: \(model.progressText)"))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let rem = model.remainingText as String?, rem != "-" {
+                                    Text(model.t("経過/残り: \(rem)", "Time: \(rem)"))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text(model.t("残りキュー: \(pendingCount) 件", "Remaining Queue: \(pendingCount)"))
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(pendingCount > 0 ? .orange : .secondary)
+                        }
+                    }
+
+                    Spacer()
+
+                    if model.isRunning {
+                        Button(model.t("停止", "Stop"), role: .destructive) {
+                            model.cancelJob()
+                        }
+                    } else if pendingCount > 0 {
+                        Button(model.t("キューを実行", "Run Queue")) {
+                            model.startQueue()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+
+                if model.isRunning {
+                    if let fraction = model.progressFraction {
+                        ProgressView(value: min(max(fraction, 0), 1))
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    }
+                }
+            }
+            .padding(8)
         }
     }
 

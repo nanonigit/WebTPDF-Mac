@@ -176,6 +176,50 @@ def find_next_page_url(html: str | bytes, current_url: str) -> str | None:
 
 
 
+def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
+    """Ensure sparse interior reader pages (e.g. 1-line copyright or half-page TOC) are not narrower/shorter than cover."""
+    if len(pdf_blobs) < 2:
+        return pdf_blobs
+    try:
+        import pymupdf
+
+        with pymupdf.open(stream=pdf_blobs[0], filetype="pdf") as cover_doc:
+            if len(cover_doc) == 0:
+                return pdf_blobs
+            cover_rect = cover_doc[0].rect
+            cover_w, cover_h = cover_rect.width, cover_rect.height
+        if cover_w < 100 or cover_h < 100:
+            return pdf_blobs
+
+        normalized: list[bytes] = [pdf_blobs[0]]
+        for blob in pdf_blobs[1:]:
+            with pymupdf.open(stream=blob, filetype="pdf") as src_doc:
+                if len(src_doc) != 1:
+                    normalized.append(blob)
+                    continue
+                r = src_doc[0].rect
+                if r.width >= cover_w * 0.90 and r.height >= cover_h * 0.90:
+                    normalized.append(blob)
+                    continue
+                target_w = max(cover_w, r.width)
+                target_h = max(cover_h, r.height)
+                out_doc = pymupdf.open()
+                page = out_doc.new_page(width=target_w, height=target_h)
+                # Center-align sparse content inside the cover-sized white page
+                x0 = (target_w - r.width) / 2.0
+                y0 = (target_h - r.height) / 2.0
+                page.show_pdf_page(
+                    pymupdf.Rect(x0, y0, x0 + r.width, y0 + r.height),
+                    src_doc,
+                    0,
+                )
+                normalized.append(out_doc.tobytes())
+                out_doc.close()
+        return normalized
+    except Exception:
+        return pdf_blobs
+
+
 def merge_pdf_bytes_list(pdf_blobs: Iterable[bytes], output_path: Path) -> int:
     """Merge a sequence of PDF byte blobs into a single PDF file and return total page count."""
     writer = PdfWriter()
@@ -2151,6 +2195,7 @@ def finish_reader_at_end(
         pdfs.append(capture.pdf)
         if verified.get(ordinal):
             pdfs.append(verified[ordinal])
+    pdfs = normalize_reader_pages_to_cover_size(pdfs)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent) as folder:
         staged = Path(folder) / output.name
@@ -2817,6 +2862,7 @@ def fetch_via_browser(
                 captures = reader_checkpoint.load()
                 if captures and reader_at_last_page(captures[-1]):
                     return finish_reader_at_end(start_url, resolved_output, turn_key, reader_checkpoint, captures, result_details)
+                collected_page_pdfs = normalize_reader_pages_to_cover_size(collected_page_pdfs)
                 resolved_output.parent.mkdir(parents=True, exist_ok=True)
                 with tempfile.TemporaryDirectory(dir=resolved_output.parent) as folder:
                     staged_output = Path(folder) / resolved_output.name
@@ -2829,6 +2875,8 @@ def fetch_via_browser(
                     if result_details is not None:
                         result_details["verifiedPages"] = written
             else:
+                if reader_mode:
+                    collected_page_pdfs = normalize_reader_pages_to_cover_size(collected_page_pdfs)
                 written = merge_pdf_bytes_list(collected_page_pdfs, resolved_output)
             captured_steps = len(collected_page_pdfs) + skipped_blank_steps
             if not reader_mode and "learning.oreilly.com" in (page.url or ""):
