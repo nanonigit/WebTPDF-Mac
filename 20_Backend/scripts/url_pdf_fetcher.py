@@ -3249,10 +3249,27 @@ def fetch_via_browser(
             is_reader_url = "read.amazon." in start_url.lower()
             page = None if is_reader_url else next((pg for pg in context.pages if pg.url == start_url), None)
             created_page = False
+            reused_dedicated_tab = False
             page_target_id: str | None = None
             if page is None:
-                page = _new_background_page(browser, context)
-                created_page = True
+                # Reuse an existing tab inside dedicated Chrome so macOS never brings Chrome to the foreground
+                # (Target.createTarget activates Chrome on macOS, whereas navigating an existing tab does not).
+                existing_pages = [pg for pg in list(context.pages) if not pg.is_closed()]
+                if existing_pages:
+                    reusable = next(
+                        (pg for pg in existing_pages if (pg.url or "").lower().startswith(("about:blank", "chrome://newtab"))),
+                        None,
+                    )
+                    if reusable is None and is_reader_url:
+                        reusable = next(
+                            (pg for pg in existing_pages if "read.amazon." in (pg.url or "").lower()),
+                            None,
+                        )
+                    page = reusable or existing_pages[-1]
+                    reused_dedicated_tab = True
+                else:
+                    page = _new_background_page(browser, context)
+                    created_page = True
                 if is_reader_url:
                     asin_match = re.search(r"(?:[?&]asin=|/manga/)([A-Z0-9]+)", start_url, re.I)
                     target_asin = asin_match.group(1).upper() if asin_match else None
@@ -3277,7 +3294,9 @@ def fetch_via_browser(
             )
             page = context.new_page()
             created_page = True
+            reused_dedicated_tab = False
             page_target_id = None
+        owns_viewport = created_page or reused_dedicated_tab
 
         cdp_session = None
         try:
@@ -3299,13 +3318,13 @@ def fetch_via_browser(
                     pass
 
             page.on("response", handle_response)
-            if created_page and "read.amazon." in start_url.lower():
+            if owns_viewport and "read.amazon." in start_url.lower():
                 try:
                     page.set_viewport_size({"width": READER_VIEWPORT_WIDTH, "height": READER_DEFAULT_HEIGHT})
                 except Exception:
                     pass
             response_status: int | None = None
-            if created_page or page.url != start_url:
+            if owns_viewport or page.url != start_url:
                 log(f"[Browser] Opening {start_url} ...")
                 nav_resp = page.goto(start_url, wait_until="domcontentloaded", timeout=timeout * 1000)
                 response_status = nav_resp.status if nav_resp else None
@@ -3354,7 +3373,7 @@ def fetch_via_browser(
                         wait_for_page_ready(page, timeout_ms=10000)
             elif reader_mode:
                 dismiss_reader_dialogs(page)
-                if created_page:
+                if owns_viewport:
                     try:
                         init_w, init_h = READER_ASPECT_PRESETS.get(aspect_preset, (READER_VIEWPORT_WIDTH, READER_DEFAULT_HEIGHT))
                         _apply_reader_viewport(page, init_w, init_h, scale_factor=scale_factor, cdp_session=cdp_session)
@@ -4060,6 +4079,12 @@ def fetch_via_browser(
                 signal.alarm(0)
             if created_page:
                 _close_page_safely(page, active_cdp_url, page_target_id)
+            elif reused_dedicated_tab and use_cdp:
+                try:
+                    if not page.is_closed():
+                        page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
             if not use_cdp:
                 try:
                     browser.close()
