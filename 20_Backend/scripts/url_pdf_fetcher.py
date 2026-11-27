@@ -3904,14 +3904,28 @@ def main() -> int:
         if checkpoint is not None and not args.no_browser:
             if not is_http_url(args.url.strip()):
                 raise ValueError("Invalid source URL")
-            total_pages, final_path = fetch_via_browser(
-                args.url.strip(), output_path,
-                max_pages=max(1, args.max_pages), timeout=max(5, args.timeout),
-                direction=args.direction, auto_name=args.auto_name, reader_checkpoint=checkpoint,
-                result_details=result_details,
-                aspect_preset=args.aspect_preset,
-                quality=args.quality,
-            )
+            consecutive_stalls = 0
+            while True:
+                before_count, _ = checkpoint.progress()
+                try:
+                    total_pages, final_path = fetch_via_browser(
+                        args.url.strip(), output_path,
+                        max_pages=max(1, args.max_pages), timeout=max(5, args.timeout),
+                        direction=args.direction, auto_name=args.auto_name, reader_checkpoint=checkpoint,
+                        result_details=result_details,
+                        aspect_preset=args.aspect_preset,
+                        quality=args.quality,
+                    )
+                    break
+                except ReaderStepTimeout:
+                    after_count, _ = checkpoint.progress()
+                    if after_count > before_count:
+                        consecutive_stalls = 0
+                    consecutive_stalls += 1
+                    if consecutive_stalls > 3:
+                        raise
+                    log(f"[Reader] Page stalled for 60s at {after_count} saved page(s); auto-resuming in a fresh tab ({consecutive_stalls}/3)...")
+                    time.sleep(3)
         elif args.auto_name and not args.no_browser:
             # Allow fetch_and_merge / fetch_via_browser to resolve final output path
             if not is_http_url(args.url.strip()):
