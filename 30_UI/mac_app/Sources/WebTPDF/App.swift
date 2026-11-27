@@ -3980,6 +3980,7 @@ struct ContentView: View {
         return GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 if !orderedIndices.isEmpty {
+                    let hasFinishedQueueItems = model.pdfQueue.contains { $0.status == .completed || $0.status == .failed }
                     HStack(spacing: 8) {
                         Text(model.t("並び順", "Sort"))
                             .font(.caption)
@@ -3992,7 +3993,42 @@ struct ContentView: View {
                         .pickerStyle(.segmented)
                         .labelsHidden()
                         .frame(maxWidth: 260)
+
                         Spacer()
+
+                        if model.isQueueAutoPaused {
+                            Button(model.t("次の本を再開", "Resume Next Book")) {
+                                model.resumeQueueAutoRun()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                        }
+
+                        if model.hasPendingQueueItems && !model.isRunning {
+                            Button(model.t("キューを連続実行", "Run Queue")) {
+                                model.startQueue()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.blue)
+                        }
+
+                        if model.hasFailedQueueItems && !model.isRunning {
+                            Button(model.t("失敗分を再実行", "Retry Failed")) {
+                                model.retryFailedQueueItems()
+                            }
+                        }
+
+                        if hasFinishedQueueItems && !model.isRunning {
+                            Button(model.t("完了済みを整理", "Clear Finished")) {
+                                model.clearFinishedQueueItems()
+                            }
+                        }
+
+                        if model.hasDuplicateQueueItems && !model.isRunning {
+                            Button(model.t("重複を整理", "Remove Duplicates")) {
+                                model.removeDuplicateQueueItems()
+                            }
+                        }
                     }
                 }
 
@@ -4204,48 +4240,6 @@ struct ContentView: View {
                                 model.queuePageIndex = min(totalPages - 1, currentPage + 1)
                             }
                             .disabled(currentPage >= totalPages - 1)
-                        }
-                        .padding(.top, 4)
-                    }
-
-                    let hasFinishedQueueItems = model.pdfQueue.contains { $0.status == .completed || $0.status == .failed }
-                    if model.isQueueAutoPaused || (model.hasPendingQueueItems && !model.isRunning) || (model.hasFailedQueueItems && !model.isRunning) || (hasFinishedQueueItems && !model.isRunning) || (model.hasDuplicateQueueItems && !model.isRunning) {
-                        HStack(spacing: 10) {
-                            if model.isQueueAutoPaused {
-                                Button(model.t("次の本を再開", "Resume Next Book")) {
-                                    model.resumeQueueAutoRun()
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.orange)
-                            }
-
-                            if model.hasPendingQueueItems && !model.isRunning {
-                                Button(model.t("キューを連続実行", "Run Queue")) {
-                                    model.startQueue()
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.blue)
-                            }
-
-                            if model.hasFailedQueueItems && !model.isRunning {
-                                Button(model.t("失敗分を再実行", "Retry Failed")) {
-                                    model.retryFailedQueueItems()
-                                }
-                            }
-
-                            if hasFinishedQueueItems && !model.isRunning {
-                                Button(model.t("完了済みを整理", "Clear Finished")) {
-                                    model.clearFinishedQueueItems()
-                                }
-                            }
-
-                            if model.hasDuplicateQueueItems && !model.isRunning {
-                                Button(model.t("重複を整理", "Remove Duplicates")) {
-                                    model.removeDuplicateQueueItems()
-                                }
-                            }
-
-                            Spacer()
                         }
                         .padding(.top, 4)
                     }
