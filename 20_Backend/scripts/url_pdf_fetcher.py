@@ -3114,6 +3114,29 @@ def detect_reader_reflowable(page) -> bool | None:
         return None
 
 
+def _new_background_page(browser, context):
+    """Create a new tab without stealing macOS foreground focus when connected over CDP."""
+    try:
+        before_pages = list(context.pages)
+        cdp = browser.new_browser_cdp_session()
+        try:
+            cdp.send("Target.createTarget", {"url": "about:blank", "background": True})
+        finally:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            for p in context.pages:
+                if p not in before_pages:
+                    return p
+            time.sleep(0.05)
+    except Exception:
+        pass
+    return context.new_page()
+
+
 def finish_reader_at_end(
     start_url: str, proposed_output: Path, turn_key: str,
     checkpoint: ReaderCheckpoint, captures: list[ReaderCapture],
@@ -3138,7 +3161,7 @@ def finish_reader_at_end(
             with sync_playwright() as p:
                 browser = p.chromium.connect_over_cdp(endpoint)
                 context = browser.contexts[0]
-                page = context.new_page()
+                page = _new_background_page(browser, context)
                 page_target_id = _get_cdp_target_id(context, page)
                 try:
                     page.set_viewport_size({"width": _infer_saved_viewport_width(captures), "height": captures[-1].viewport_height or READER_DEFAULT_HEIGHT})
@@ -3229,7 +3252,7 @@ def fetch_via_browser(
             created_page = False
             page_target_id: str | None = None
             if page is None:
-                page = context.new_page()
+                page = _new_background_page(browser, context)
                 created_page = True
                 page_target_id = _get_cdp_target_id(context, page)
         else:
@@ -3274,10 +3297,6 @@ def fetch_via_browser(
                 response_status = nav_resp.status if nav_resp else None
             else:
                 log(f"[Browser] Using already-open tab: {page.url}")
-                try:
-                    page.bring_to_front()
-                except Exception:
-                    pass
 
             log("[Browser] Waiting for page render...")
             wait_for_page_ready(page, timeout_ms=12000)
@@ -3440,7 +3459,7 @@ def fetch_via_browser(
                             candidate = None
                             candidate_target_id: str | None = None
                             try:
-                                candidate = context.new_page()
+                                candidate = _new_background_page(browser, context) if use_cdp else context.new_page()
                                 candidate_target_id = _get_cdp_target_id(context, candidate) if use_cdp else None
                                 if page.viewport_size:
                                     candidate.set_viewport_size(page.viewport_size)

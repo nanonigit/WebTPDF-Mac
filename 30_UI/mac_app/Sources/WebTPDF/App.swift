@@ -1042,6 +1042,53 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(fetchedPDFURL)
     }
 
+    private func isDedicatedChromeCDPReady() async -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:9223/json/version") else { return false }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 1.0
+        do {
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                return true
+            }
+        } catch {}
+        return false
+    }
+
+    private func ensureDedicatedChromeRunningInBackground() async {
+        if await isDedicatedChromeCDPReady() {
+            return
+        }
+        let chromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        guard FileManager.default.isExecutableFile(atPath: chromePath) else { return }
+
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+        let profileDir = URL(fileURLWithPath: home, isDirectory: true)
+            .appendingPathComponent(".cache", isDirectory: true)
+            .appendingPathComponent("ebookconverter-chrome", isDirectory: true)
+        try? FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
+
+        appendLog("[Browser] 専用 Chrome をバックグラウンドで自動起動しています...\n")
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        proc.arguments = [
+            "-g", "-n", "-a", "Google Chrome",
+            "--args",
+            "--remote-debugging-port=9223",
+            "--user-data-dir=\(profileDir.path)",
+            "--no-first-run",
+        ]
+        try? proc.run()
+
+        for _ in 0..<25 {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if await isDedicatedChromeCDPReady() {
+                appendLog("[Browser] 専用 Chrome のバックグラウンド接続準備が完了しました。\n")
+                return
+            }
+        }
+    }
+
     func launchLoginBrowser() {
         let chromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         guard FileManager.default.isExecutableFile(atPath: chromePath) else {
@@ -2908,6 +2955,8 @@ final class AppModel: ObservableObject {
         guard let scriptURL = resolveURLFetcherScript() else {
             throw UserVisibleError(message: "url_pdf_fetcher.py がアプリ内に見つかりませんでした。")
         }
+
+        await ensureDedicatedChromeRunningInBackground()
 
         try FileManager.default.createDirectory(at: fetchedPDFRoot, withIntermediateDirectories: true)
         let hostPart = (parsed.host ?? "web").replacingOccurrences(
