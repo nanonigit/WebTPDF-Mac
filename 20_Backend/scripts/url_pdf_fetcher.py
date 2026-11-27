@@ -2938,18 +2938,24 @@ def resolve_auto_output_path(base_output: Path, title: str | None, pub_date: str
     return base_output
 
 
+def _is_reader_at_end(position: int | None, total: int | None, percent: int | None) -> bool:
+    """Single source of truth for whether Kindle Web Reader has reached the final page
+    (handles printed pages, Location-based books like 2472/2478 = 99.8%, and 98-100% tails)."""
+    if percent is not None and percent >= 98:
+        return True
+    if total is not None and total > 0 and position is not None:
+        if position >= total - 1:
+            return True
+        if (position / total) >= 0.98:
+            return True
+    return False
+
+
 def reader_at_last_page(capture: ReaderCapture, saved_count: int | None = None) -> bool:
     if capture.total is None:
         return False
-    if capture.position is not None:
-        if capture.position >= capture.total and capture.percent == 100:
-            return True
-        # Books whose final page is an intentionally blank/rating screen or Location-based tail
-        # (e.g. Location 2472 of 2478 = 99.8%) often stop within the final 2%.
-        if capture.total > 0 and (capture.position / capture.total) >= 0.98:
-            return True
-        if capture.percent is not None and capture.percent >= 98 and capture.position >= capture.total - 1:
-            return True
+    if _is_reader_at_end(capture.position, capture.total, capture.percent):
+        return True
     # When Kindle hides the footer near the end (position=None, stale percent),
     # having already captured total - 1 or more pages (e.g. 193/194 after skipping 1 blank page) means the book is complete.
     if saved_count is not None and saved_count >= capture.total - 1:
@@ -3477,6 +3483,7 @@ def fetch_via_browser(
             consecutive_blank_skips = 0
             prev_hash: str | None = None
             prev_pdf_hash: str | None = None
+            recent_pdf_hashes: list[str] = []
             last_reader_page: int | None = None
             expected_total_pages: int | None = None
             last_reader_percent: int | None = None
@@ -3506,7 +3513,7 @@ def fetch_via_browser(
                 if reader_mode:
                     dismiss_reader_dialogs(page)
                     if needs_recovery or is_reader_oops(page):
-                        if last_reader_page is not None and last_reader_page == expected_total_pages and last_reader_percent == 100:
+                        if _is_reader_at_end(last_reader_page, expected_total_pages, last_reader_percent):
                             break
                         if recovery_attempts >= 5:
                             raise IncompleteReaderCapture(
@@ -3760,7 +3767,7 @@ def fetch_via_browser(
                                 break
                         if is_reader_oops(page):
                             continue
-                        if not advanced and (recovery_attempts or (
+                        if not advanced and not _is_reader_at_end(last_reader_page, expected_total_pages, last_reader_percent) and (recovery_attempts or (
                             expected_total_pages is not None and last_reader_page is not None
                             and last_reader_page < expected_total_pages
                         )):
@@ -4005,7 +4012,7 @@ def fetch_via_browser(
                     if reader_mode and is_reader_oops(page):
                         continue
                     if prev_pdf_hash == current_pdf_hash:
-                        if reader_mode and (recovery_attempts or (
+                        if reader_mode and not _is_reader_at_end(last_reader_page, expected_total_pages, last_reader_percent) and (recovery_attempts or (
                             expected_total_pages is not None and last_reader_page is not None
                             and last_reader_page < expected_total_pages
                         )):
@@ -4021,8 +4028,14 @@ def fetch_via_browser(
                         break
                 if reader_mode and is_reader_oops(page):
                     continue
+                if reader_mode and current_pdf_hash in recent_pdf_hashes:
+                    log(f"[Reader] Detected repeated page cycle at page {page_idx} (already captured in recent pages); stopping pagination cleanly.")
+                    break
                 prev_hash = current_hash
                 prev_pdf_hash = current_pdf_hash
+                recent_pdf_hashes.append(current_pdf_hash)
+                if len(recent_pdf_hashes) > 10:
+                    recent_pdf_hashes = recent_pdf_hashes[-10:]
                 if reader_mode:
                     last_reader_image_hash = hashlib.sha256(reader_png).hexdigest() if reader_png is not None else None
                     marker = get_reader_position(page)
