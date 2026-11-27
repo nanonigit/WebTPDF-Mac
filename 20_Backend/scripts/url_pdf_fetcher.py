@@ -3131,25 +3131,8 @@ def detect_reader_reflowable(page) -> bool | None:
 
 
 def _new_background_page(browser, context):
-    """Create a new tab without stealing macOS foreground focus when connected over CDP."""
-    try:
-        before_pages = list(context.pages)
-        cdp = browser.new_browser_cdp_session()
-        try:
-            cdp.send("Target.createTarget", {"url": "about:blank", "background": True})
-        finally:
-            try:
-                cdp.detach()
-            except Exception:
-                pass
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            for p in context.pages:
-                if p not in before_pages:
-                    return p
-            time.sleep(0.05)
-    except Exception:
-        pass
+    """Create an active tab inside Chrome's window so Chromium does not throttle its compositor/screenshots
+    (macOS foreground focus is kept undisturbed by launching Chrome with `open -g` and omitting bring_to_front)."""
     return context.new_page()
 
 
@@ -3627,7 +3610,7 @@ def fetch_via_browser(
                                     oreilly_last_filename = spine_info.get("lastFilename") or None
                             except Exception:
                                 pass
-                png_bytes = page.screenshot(full_page=False, timeout=15000)
+                png_bytes = _take_screenshot_resilient(page, timeout_ms=15000)
                 current_hash = hashlib.sha256(png_bytes).hexdigest()
 
                 if prev_hash == current_hash:
@@ -3637,7 +3620,7 @@ def fetch_via_browser(
                             page.keyboard.press(turn_key)
                             page.wait_for_timeout(1800)
                             wait_for_page_ready(page, timeout_ms=10000)
-                            png_retry = page.screenshot(full_page=False, timeout=15000)
+                            png_retry = _take_screenshot_resilient(page, timeout_ms=15000)
                             retry_hash = hashlib.sha256(png_retry).hexdigest()
                             if retry_hash == prev_hash:
                                 for selector in arrow_button_selectors:
@@ -3650,7 +3633,7 @@ def fetch_via_browser(
                                             break
                                     except Exception:
                                         continue
-                                png_retry = page.screenshot(full_page=False, timeout=15000)
+                                png_retry = _take_screenshot_resilient(page, timeout_ms=15000)
                                 retry_hash = hashlib.sha256(png_retry).hexdigest()
                             if retry_hash != prev_hash:
                                 png_bytes = png_retry
@@ -3673,7 +3656,7 @@ def fetch_via_browser(
                                 page.wait_for_timeout(1500)
                             if is_reader_oops(page):
                                 break
-                            png_retry = page.screenshot(full_page=False, timeout=15000)
+                            png_retry = _take_screenshot_resilient(page, timeout_ms=15000)
                             retry_hash = hashlib.sha256(png_retry).hexdigest()
                             if retry_hash == prev_hash:
                                 for selector in arrow_button_selectors:
@@ -3687,7 +3670,7 @@ def fetch_via_browser(
                                         continue
                                 if is_reader_oops(page):
                                     break
-                                png_retry = page.screenshot(full_page=False, timeout=15000)
+                                png_retry = _take_screenshot_resilient(page, timeout_ms=15000)
                                 retry_hash = hashlib.sha256(png_retry).hexdigest()
                             if retry_hash != prev_hash:
                                 png_bytes = png_retry
@@ -3971,7 +3954,7 @@ def fetch_via_browser(
                     log(f"[Browser] Intercepted PDF response after page turn {page_idx}.")
 
                 # Fallback: if ArrowRight key did not change the URL or view, try clicking a right-arrow / next button
-                after_key_hash = hashlib.sha256(page.screenshot(full_page=False, timeout=15000)).hexdigest()
+                after_key_hash = hashlib.sha256(_take_screenshot_resilient(page, timeout_ms=15000)).hexdigest()
                 if page.url == url_before_turn and after_key_hash == current_hash:
                     for selector in arrow_button_selectors:
                         locator = page.locator(selector).first

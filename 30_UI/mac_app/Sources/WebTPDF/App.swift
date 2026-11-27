@@ -1077,6 +1077,8 @@ final class AppModel: ObservableObject {
             "--remote-debugging-port=9223",
             "--user-data-dir=\(profileDir.path)",
             "--no-first-run",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
         ]
         try? proc.run()
 
@@ -1111,6 +1113,8 @@ final class AppModel: ObservableObject {
         var arguments = [
             "--remote-debugging-port=9223",
             "--user-data-dir=\(profileDir.path)",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
         ]
         if let parsed = URL(string: trimmedSourceURL),
            let scheme = parsed.scheme?.lowercased(),
