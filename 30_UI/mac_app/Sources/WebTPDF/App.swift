@@ -5238,21 +5238,6 @@ struct ContentView: View {
                         }
 
                         Toggle(
-                            model.t("表紙サイズ基準で余白カット（Kindleのツールバー・下部バーも自動除去）", "Trim margins to cover size (also strips Kindle toolbar/footer)"),
-                            isOn: $model.squeezerTrimToCover
-                        )
-                        .disabled(model.isRunning)
-
-                        if model.squeezerTrimToCover {
-                            Toggle(
-                                model.t("画質を落とさず余白カットのみ実行（再圧縮しない）", "Trim only without recompression (keeps original quality)"),
-                                isOn: $model.squeezerSkipCompression
-                            )
-                            .disabled(model.isRunning)
-                            .padding(.leading, 20)
-                        }
-
-                        Toggle(
                             model.t("③ AI読み込み用にサイズ上限でフォルダ分割する（元のファイルはそのまま残す）", "③ Split into a dedicated folder under size limit for AI (keeps original intact)"),
                             isOn: $model.squeezerSplitEnabled
                         )
