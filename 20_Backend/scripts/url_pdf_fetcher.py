@@ -231,8 +231,12 @@ def _content_bbox_stripping_letterbox(im: Image.Image) -> tuple[int, int, int, i
     return (left, top, right, bottom)
 
 
-def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
-    """Normalize all reader pages to one uniform book size and trim shared outer white letterbox margins."""
+def normalize_reader_pages_to_cover_size(
+    pdf_blobs: list[bytes],
+    is_reflowable: bool | None = None,
+) -> list[bytes]:
+    """Normalize all reader pages to one uniform book size, trim shared outer letterbox bars,
+    and add a comfortable top/bottom reading margin on reflowable white-background text books."""
     if len(pdf_blobs) < 2:
         return pdf_blobs
     try:
@@ -265,7 +269,7 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
             | {single_indices[int(k * (len(single_indices) - 1) / max(1, sample_count - 1))] for k in range(sample_count)}
         )
 
-        def _non_white_bbox_in_canvas(blob: bytes, rw: float, rh: float) -> tuple[tuple[float, float, float, float], float, bool] | None:
+        def _non_white_bbox_in_canvas(blob: bytes, rw: float, rh: float) -> tuple[tuple[float, float, float, float], float, bool, bool] | None:
             with pymupdf.open(stream=blob, filetype="pdf") as d:
                 pix = d[0].get_pixmap(dpi=72)
                 if pix.width < 10 or pix.height < 10:
@@ -274,11 +278,16 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
                 bb = _content_bbox_stripping_letterbox(im)
                 if not bb:
                     return None
-                # Check if outer edges were dark/black letterbox bars and estimate artwork fill density inside bbox.
+                # Check if outer edges were dark/black letterbox bars and whether top/bottom edges are white paper.
                 gray = im.convert("L")
                 top_val = gray.getpixel((pix.width // 2, 0))
                 bot_val = gray.getpixel((pix.width // 2, pix.height - 1))
                 has_dark_bar = (top_val <= 15 or bot_val <= 15) and (bb[1] > 2 or bb[3] < pix.height - 2)
+                step_x = max(1, pix.width // 32)
+                edge_xs = list(range(0, pix.width, step_x))
+                edge_top_white = sum(1 for x in edge_xs if gray.getpixel((x, 0)) >= 245) / max(1, len(edge_xs))
+                edge_bot_white = sum(1 for x in edge_xs if gray.getpixel((x, pix.height - 1)) >= 245) / max(1, len(edge_xs))
+                is_white_edge = (not has_dark_bar) and (edge_top_white >= 0.85) and (edge_bot_white >= 0.85)
                 crop_g = gray.crop(bb).resize((48, 48))
                 non_white = sum(1 for v in crop_g.getdata() if v < 240)
                 density = non_white / (48.0 * 48.0)
@@ -286,12 +295,15 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
                 sy = rh / pix.height
                 ox = (max_w - rw) / 2.0
                 oy = (max_h - rh) / 2.0
-                return (ox + bb[0] * sx, oy + bb[1] * sy, ox + bb[2] * sx, oy + bb[3] * sy), density, has_dark_bar
+                return (ox + bb[0] * sx, oy + bb[1] * sy, ox + bb[2] * sx, oy + bb[3] * sy), density, has_dark_bar, is_white_edge
 
         cover_bbox: tuple[float, float, float, float] | None = None
         cover_density: float = 0.0
         has_any_dark_bar = False
         sample_bboxes: list[tuple[float, float, float, float]] = []
+        body_bboxes: list[tuple[float, float, float, float]] = []
+        body_white_edge_count = 0
+        body_sample_total = 0
         for idx in sample_indices:
             sz = rects[idx]
             if sz is None:
@@ -299,14 +311,20 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
             res = _non_white_bbox_in_canvas(pdf_blobs[idx], sz[0], sz[1])
             if res is None:
                 continue
-            bb, density, is_dark = res
+            bb, density, is_dark, is_white_edge = res
             if is_dark:
                 has_any_dark_bar = True
+            if idx != single_indices[0]:
+                body_sample_total += 1
+                if is_white_edge:
+                    body_white_edge_count += 1
             if (bb[2] - bb[0]) >= max_w * 0.15 and (bb[3] - bb[1]) >= max_h * 0.15:
                 sample_bboxes.append(bb)
                 if idx == single_indices[0]:
                     cover_bbox = bb
                     cover_density = density
+                else:
+                    body_bboxes.append(bb)
 
         # Compute uniform book crop rect:
         # - For black-letterboxed fixed-layout books, trim cleanly to 0pt so zero black bars remain.
@@ -334,9 +352,44 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
                 if (cx1 - cx0) < max_w * threshold or (cy1 - cy0) < max_h * threshold:
                     crop_x0, crop_y0, crop_x1, crop_y1 = cx0, cy0, cx1, cy1
 
-        out_w = round(crop_x1 - crop_x0, 2)
-        out_h = round(crop_y1 - crop_y0, 2)
-        trimmed = (crop_x0 > 0.5 or crop_y0 > 0.5 or abs(out_w - max_w) > 1.0 or abs(out_h - max_h) > 1.0)
+        base_w = crop_x1 - crop_x0
+        base_h = crop_y1 - crop_y0
+        # For reflowable white-background text books where body text sits flush against the top/bottom edges,
+        # extend the white canvas vertically to guarantee a comfortable ~5.5% top & bottom reading margin
+        # (EBPAJ vertical-Japanese ebook guideline recommends 5-10% vertical breathing room).
+        # Never add extra margins to fixed-layout books (comics, scores, print-replica PDFs).
+        extra_top = 0.0
+        extra_bot = 0.0
+        white_edge_threshold = 0.6 if is_reflowable is True else 0.8
+        if (
+            is_reflowable is not False
+            and not has_any_dark_bar
+            and body_sample_total > 0
+            and (body_white_edge_count / body_sample_total) >= white_edge_threshold
+            and body_bboxes
+        ):
+            body_top_spaces = sorted(max(0.0, b[1] - crop_y0) for b in body_bboxes)
+            body_bot_spaces = sorted(max(0.0, crop_y1 - b[3]) for b in body_bboxes)
+            p25_top = body_top_spaces[len(body_top_spaces) // 4]
+            p25_bot = body_bot_spaces[len(body_bot_spaces) // 4]
+            target_margin_y = round(base_h * 0.055, 2)
+            extra_top = max(0.0, round(target_margin_y - p25_top, 2))
+            extra_bot = max(0.0, round(target_margin_y - p25_bot, 2))
+            if extra_top < 2.0:
+                extra_top = 0.0
+            if extra_bot < 2.0:
+                extra_bot = 0.0
+
+        out_w = round(base_w, 2)
+        out_h = round(base_h + extra_top + extra_bot, 2)
+        trimmed = (
+            crop_x0 > 0.5
+            or crop_y0 > 0.5
+            or extra_top > 0.5
+            or extra_bot > 0.5
+            or abs(out_w - max_w) > 1.0
+            or abs(out_h - max_h) > 1.0
+        )
 
         normalized: list[bytes] = []
         for idx, (blob, sz) in enumerate(zip(pdf_blobs, rects)):
@@ -390,9 +443,9 @@ def normalize_reader_pages_to_cover_size(pdf_blobs: list[bytes]) -> list[bytes]:
                     src_x1 = min(rw, crop_x1 - ox)
                     src_y1 = min(rh, crop_y1 - oy)
                     dest_x0 = (ox + src_x0) - crop_x0
-                    dest_y0 = (oy + src_y0) - crop_y0
+                    dest_y0 = (oy + src_y0) - crop_y0 + extra_top
                     dest_x1 = (ox + src_x1) - crop_x0
-                    dest_y1 = (oy + src_y1) - crop_y0
+                    dest_y1 = (oy + src_y1) - crop_y0 + extra_top
                     page.show_pdf_page(
                         pymupdf.Rect(dest_x0, dest_y0, dest_x1, dest_y1),
                         src_doc,
@@ -2925,10 +2978,65 @@ def _close_page_safely(page, cdp_url: str | None = None, target_id: str | None =
             pass
 
 
+def detect_reader_reflowable(page) -> bool | None:
+    """Detect whether the open Kindle Web Reader book is reflowable (font size / Aa settings enabled)
+    versus fixed-layout (comics, scores, print-replica books where Aa settings are absent or disabled)."""
+    try:
+        result = page.evaluate(
+            r"""() => {
+                const docs = [document];
+                for (const frame of document.querySelectorAll('iframe')) {
+                    try {
+                        if (frame.contentDocument) docs.push(frame.contentDocument);
+                    } catch (_) {}
+                }
+                let sawToolbar = false;
+                let sawEnabledAa = false;
+                let sawDisabledAa = false;
+                for (const doc of docs) {
+                    if (doc.querySelector('#kr-renderer, #top-menu-bar, [aria-label*="Table of Contents" i], [aria-label*="目次"]')) {
+                        sawToolbar = true;
+                    }
+                    const nodes = Array.from(doc.querySelectorAll('button, [role="button"], ion-button'));
+                    for (const el of nodes) {
+                        const label = (
+                            (el.getAttribute('aria-label') || '') + ' ' +
+                            (el.getAttribute('title') || '') + ' ' +
+                            (el.getAttribute('data-testid') || '') + ' ' +
+                            (el.id || '')
+                        ).trim();
+                        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                        const isAa = (
+                            /^Aa$/i.test(text) ||
+                            /(?:font|display\s*setting|reader\s*setting|text\s*setting|フォント|表示設定|文字サイズ|レイアウト)/i.test(label)
+                        );
+                        if (!isAa) continue;
+                        sawToolbar = true;
+                        const style = window.getComputedStyle(el);
+                        const hidden = style.display === 'none' || style.visibility === 'hidden';
+                        const disabled = Boolean(el.disabled) || el.getAttribute('aria-disabled') === 'true';
+                        if (!hidden && !disabled) {
+                            sawEnabledAa = true;
+                        } else {
+                            sawDisabledAa = true;
+                        }
+                    }
+                }
+                if (sawEnabledAa) return true;
+                if (sawDisabledAa || sawToolbar) return false;
+                return null;
+            }"""
+        )
+        return result if isinstance(result, bool) else None
+    except Exception:
+        return None
+
+
 def finish_reader_at_end(
     start_url: str, proposed_output: Path, turn_key: str,
     checkpoint: ReaderCheckpoint, captures: list[ReaderCapture],
     result_details: dict[str, int] | None,
+    is_reflowable: bool | None = None,
 ) -> tuple[int, Path]:
     """Check potential gaps within the saved sequence and publish a single PDF."""
     gaps = reader_gap_candidates(captures)
@@ -2983,7 +3091,7 @@ def finish_reader_at_end(
         pdfs.append(capture.pdf)
         if verified.get(ordinal):
             pdfs.append(verified[ordinal])
-    pdfs = normalize_reader_pages_to_cover_size(pdfs)
+    pdfs = normalize_reader_pages_to_cover_size(pdfs, is_reflowable=is_reflowable)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent) as folder:
         staged = Path(folder) / output.name
@@ -3105,6 +3213,13 @@ def fetch_via_browser(
                 if resolved_output != output_path:
                     log(f"[AutoName] Output filename -> {resolved_output.name}")
             book_title = detected_title if reader_mode else None
+            reader_is_reflowable: bool | None = None
+            if reader_mode and not reader_error_at_open:
+                reader_is_reflowable = detect_reader_reflowable(page)
+                if reader_is_reflowable is True:
+                    log("[Reader] Layout type: reflowable (Aa font settings available -> adding vertical reading margins if needed).")
+                elif reader_is_reflowable is False:
+                    log("[Reader] Layout type: fixed-layout (no Aa font settings -> preserving exact edge-to-edge layout).")
             saved_pages = saved_captures
             restored_skipped_steps = 0
             if saved_pages:
@@ -3749,8 +3864,8 @@ def fetch_via_browser(
             elif reader_mode and reader_checkpoint is not None:
                 captures = reader_checkpoint.load()
                 if captures and reader_at_last_page(captures[-1]):
-                    return finish_reader_at_end(start_url, resolved_output, turn_key, reader_checkpoint, captures, result_details)
-                collected_page_pdfs = normalize_reader_pages_to_cover_size(collected_page_pdfs)
+                    return finish_reader_at_end(start_url, resolved_output, turn_key, reader_checkpoint, captures, result_details, is_reflowable=reader_is_reflowable)
+                collected_page_pdfs = normalize_reader_pages_to_cover_size(collected_page_pdfs, is_reflowable=reader_is_reflowable)
                 resolved_output.parent.mkdir(parents=True, exist_ok=True)
                 with tempfile.TemporaryDirectory(dir=resolved_output.parent) as folder:
                     staged_output = Path(folder) / resolved_output.name
@@ -3764,7 +3879,7 @@ def fetch_via_browser(
                         result_details["verifiedPages"] = written
             else:
                 if reader_mode:
-                    collected_page_pdfs = normalize_reader_pages_to_cover_size(collected_page_pdfs)
+                    collected_page_pdfs = normalize_reader_pages_to_cover_size(collected_page_pdfs, is_reflowable=reader_is_reflowable)
                 written = merge_pdf_bytes_list(collected_page_pdfs, resolved_output)
             captured_steps = len(collected_page_pdfs) + skipped_blank_steps
             if not reader_mode and "learning.oreilly.com" in (page.url or ""):
