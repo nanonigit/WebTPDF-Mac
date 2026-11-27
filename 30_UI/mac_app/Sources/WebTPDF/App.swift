@@ -223,6 +223,7 @@ final class AppModel: ObservableObject {
     }
 
     enum URLToPDFSectionID: String, Codable, CaseIterable, Identifiable {
+        case activeJob
         case captureSettings
         case queue
         case history
@@ -232,6 +233,7 @@ final class AppModel: ObservableObject {
 
         func title(_ lang: UILanguage) -> String {
             switch self {
+            case .activeJob: return lang == .ja ? "現在の作業状況" : "Active Job"
             case .captureSettings: return lang == .ja ? "URL取得設定" : "Capture Settings"
             case .queue: return lang == .ja ? "実行キュー" : "Execution Queue"
             case .history: return lang == .ja ? "取得履歴" : "Fetch History"
@@ -545,7 +547,11 @@ final class AppModel: ObservableObject {
         var seen = Set<URLToPDFSectionID>()
         var result = decoded.filter { seen.insert($0).inserted }
         for id in fallback where !seen.contains(id) {
-            result.append(id)
+            if id == .activeJob {
+                result.insert(id, at: 0)
+            } else {
+                result.append(id)
+            }
         }
         return result
     }() {
@@ -3523,7 +3529,7 @@ struct ContentView: View {
             case .runtime: return lang == .ja ? "実行環境" : "Runtime"
             case .dashboard: return lang == .ja ? "ダッシュボード" : "Dashboard"
             case .urlToPDF: return lang == .ja ? "URL → PDF 作成" : "URL to PDF"
-            case .pdfSqueezer: return lang == .ja ? "PDF圧縮" : "PDF Squeezer"
+            case .pdfSqueezer: return lang == .ja ? "PDF圧縮・分割" : "Compress & Split PDF"
             case .audioLab: return lang == .ja ? "オーディオブック変換" : "Audiobook"
             case .library: return lang == .ja ? "PDFライブラリ" : "PDF Library"
             case .models: return lang == .ja ? "AI接続" : "AI Connection"
@@ -3564,7 +3570,7 @@ struct ContentView: View {
     }
 
     @ObservedObject var model: AppModel
-    @State private var destination: Destination? = .dashboard
+    @State private var destination: Destination? = .urlToPDF
     @State private var settingsTab: SettingsTab = .runtime
     @State private var confirmClearRecentPDFs = false
     @FocusState private var isSourceURLFocused: Bool
@@ -3573,8 +3579,6 @@ struct ContentView: View {
         NavigationSplitView {
             List(selection: $destination) {
                 Section(model.t("機能", "Features")) {
-                    Label(Destination.dashboard.title(model.uiLanguage), systemImage: Destination.dashboard.symbol)
-                        .tag(Destination.dashboard)
                     Label(Destination.urlToPDF.title(model.uiLanguage), systemImage: Destination.urlToPDF.symbol)
                         .tag(Destination.urlToPDF)
                     Label(Destination.audioLab.title(model.uiLanguage), systemImage: Destination.audioLab.symbol)
@@ -3591,12 +3595,10 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 195, ideal: 215, max: 260)
         } detail: {
             Group {
-                switch destination ?? .dashboard {
+                switch destination ?? .urlToPDF {
                 case .runtime:
                     runtimeView
-                case .dashboard:
-                    dashboardView
-                case .urlToPDF:
+                case .dashboard, .urlToPDF:
                     urlToPDFView
                 case .pdfSqueezer:
                     pdfSqueezerView
@@ -3612,10 +3614,10 @@ struct ContentView: View {
                     settingsView
                 }
             }
-            .navigationTitle((destination ?? .dashboard).title(model.uiLanguage))
+            .navigationTitle((destination ?? .urlToPDF).title(model.uiLanguage))
             .onAppear {
-                if destination == nil {
-                    destination = .dashboard
+                if destination == nil || destination == .dashboard {
+                    destination = .urlToPDF
                 }
             }
             .toolbar {
@@ -3667,6 +3669,19 @@ struct ContentView: View {
     private var urlToPDFView: some View {
         VisibleScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                HStack(alignment: .center, spacing: 12) {
+                    Text("WebTPDF Mac")
+                        .font(.title2.bold())
+                    Text(model.appVersionDisplay)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor.opacity(0.14), in: Capsule())
+                    Spacer()
+                    updateAppButton
+                }
+
                 ForEach(model.urlToPDFSectionOrder) { sectionID in
                     urlToPDFCollapsibleSection(sectionID)
                 }
@@ -3725,6 +3740,8 @@ struct ContentView: View {
 
             if !collapsed {
                 switch sectionID {
+                case .activeJob:
+                    dashboardActiveJobSection
                 case .captureSettings:
                     urlCaptureSettingsBox
                 case .queue:
