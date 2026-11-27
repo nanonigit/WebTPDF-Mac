@@ -328,9 +328,17 @@ def normalize_reader_pages_to_cover_size(
                 else:
                     body_bboxes.append(bb)
 
+        is_reflowable_text_book = (
+            is_reflowable is True
+            and not has_any_dark_bar
+            and body_sample_total > 0
+            and (body_white_edge_count / body_sample_total) >= 0.70
+        )
+
         # Compute uniform book crop rect:
-        # - For black-letterboxed fixed-layout books, trim cleanly to 0pt so zero black bars remain.
-        # - For white-background text books, only trim excessive margins (>6%) and keep a clean 3% reading margin.
+        # - For fixed-layout books (whether black- or white-letterboxed in Kindle's viewport),
+        #   trim outer letterbox bars cleanly to 0pt so zero white/black bars remain.
+        # - For confirmed reflowable white-paper text books, keep a clean 3% reading margin.
         crop_x0, crop_y0, crop_x1, crop_y1 = 0.0, 0.0, max_w, max_h
         if sample_bboxes:
             ux0 = min(b[0] for b in sample_bboxes)
@@ -340,13 +348,13 @@ def normalize_reader_pages_to_cover_size(
             uw = ux1 - ux0
             uh = uy1 - uy0
             if uw >= max_w * 0.35 and uh >= max_h * 0.35:
-                if has_any_dark_bar:
-                    pad_x, pad_y = 0.0, 0.0
-                    threshold = 0.99
-                else:
+                if is_reflowable_text_book:
                     pad_x = max(12.0, uw * 0.03)
                     pad_y = max(14.0, uh * 0.03)
                     threshold = 0.94
+                else:
+                    pad_x, pad_y = 0.0, 0.0
+                    threshold = 0.99
                 cx0 = max(0.0, ux0 - pad_x)
                 cy0 = max(0.0, uy0 - pad_y)
                 cx1 = min(max_w, ux1 + pad_x)
@@ -362,13 +370,7 @@ def normalize_reader_pages_to_cover_size(
         # Never add extra margins to fixed-layout books (magazines, comics, scores, print-replica PDFs).
         extra_top = 0.0
         extra_bot = 0.0
-        if (
-            is_reflowable is True
-            and not has_any_dark_bar
-            and body_sample_total > 0
-            and (body_white_edge_count / body_sample_total) >= 0.70
-            and body_bboxes
-        ):
+        if is_reflowable_text_book and body_bboxes:
             body_top_spaces = sorted(max(0.0, b[1] - crop_y0) for b in body_bboxes)
             body_bot_spaces = sorted(max(0.0, crop_y1 - b[3]) for b in body_bboxes)
             p25_top = body_top_spaces[len(body_top_spaces) // 4]
