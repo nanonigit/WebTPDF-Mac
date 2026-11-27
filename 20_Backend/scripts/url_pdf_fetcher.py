@@ -981,7 +981,7 @@ def jump_to_reader_toc_start(page) -> tuple[bool, bool]:
         for _ in range(4):
             if panel.evaluate("node => node === document.body || node === document.documentElement"):
                 break
-            info = panel.evaluate("""(panel, {selector}) => {
+            info = panel.evaluate(r"""(panel, {selector}) => {
                 const entries = [...panel.querySelectorAll(selector)];
                 const chapters = entries.filter(node =>
                     node.getClientRects().length && node.textContent.trim() &&
@@ -1466,7 +1466,16 @@ class CaptureCanceled(BaseException):
     """Let cleanup run on a Stop request without treating it as a retryable reader error."""
 
 
+class ReaderStepTimeout(TimeoutError):
+    """Raised by SIGALRM watchdog when a single Reader page capture/turn hangs."""
+
+
+def _handle_step_timeout(_signum, _frame) -> None:
+    raise ReaderStepTimeout("Reader page step exceeded watchdog timeout")
+
+
 def cancel_capture(_signum, _frame) -> None:
+    signal.alarm(0)
     raise CaptureCanceled()
 
 
@@ -3190,9 +3199,14 @@ def fetch_via_browser(
             if len(saved_pages) > max_pages:
                 raise ValueError(f"最大ページ数を取得済みの {len(saved_pages)} ページ以上に設定してください。")
 
+            if reader_mode and hasattr(signal, "SIGALRM"):
+                signal.signal(signal.SIGALRM, _handle_step_timeout)
+
             while len(collected_page_pdfs) < max_pages:
                 page_idx = len(collected_page_pdfs) + 1
                 reader_png = None
+                if reader_mode and hasattr(signal, "SIGALRM"):
+                    signal.alarm(60)
                 if reader_mode:
                     dismiss_reader_dialogs(page)
                     if needs_recovery or is_reader_oops(page):
@@ -3728,6 +3742,8 @@ def fetch_via_browser(
                         except Exception:
                             continue
 
+            if reader_mode and hasattr(signal, "SIGALRM"):
+                signal.alarm(0)
             if not reader_mode and captured_pdfs and len(captured_pdfs) >= len(collected_page_pdfs):
                 written = merge_pdf_bytes_list(captured_pdfs, resolved_output)
             elif reader_mode and reader_checkpoint is not None:
@@ -3787,6 +3803,8 @@ def fetch_via_browser(
                     result_details["lastPrintedPage"] = captured_steps
             return written, resolved_output
         finally:
+            if hasattr(signal, "SIGALRM"):
+                signal.alarm(0)
             if created_page:
                 _close_page_safely(page, active_cdp_url, page_target_id)
             if not use_cdp:
@@ -3944,6 +3962,17 @@ def main() -> int:
                 }), encoding="utf-8")
         log("[Fetch] Canceled.")
         return 130
+    except ReaderStepTimeout:
+        if args.result_json and checkpoint is not None:
+            count, total = checkpoint.progress()
+            if count:
+                args.result_json.write_text(json.dumps({
+                    "pageCount": count,
+                    "expectedPages": total,
+                    "message": f"ページの応答が 60 秒以上止まったため中断しました（取得済み: {count} ページ）。",
+                }), encoding="utf-8")
+        print("Error: Reader page step timed out after 60s.", file=sys.stderr, flush=True)
+        return 1
     except Exception as exc:
         if args.result_json and isinstance(exc, IncompleteReaderCapture):
             args.result_json.write_text(json.dumps({
