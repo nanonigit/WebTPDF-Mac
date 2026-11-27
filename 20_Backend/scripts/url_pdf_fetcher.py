@@ -955,7 +955,7 @@ def jump_to_reader_toc_start(page) -> tuple[bool, bool]:
     try:
         heading.wait_for(state="visible", timeout=2500)
         # First, directly match an explicit Cover / 表紙 entry in the open TOC sidebar.
-        cover_pattern = re.compile(r"^(?:表紙|Cover|Beginning|先頭)$", re.I)
+        cover_pattern = re.compile(r"^(?:表紙|カバー|書影|Front\s*Cover|Book\s*Cover|Cover|Beginning|先頭)$", re.I)
         cover_loc = page.get_by_text(cover_pattern).filter(visible=True).first
         if cover_loc.count() > 0:
             cover_loc.click(timeout=2500)
@@ -989,7 +989,7 @@ def jump_to_reader_toc_start(page) -> tuple[bool, bool]:
                     node.getAttribute('aria-disabled') !== 'true'
                 );
                 if (!chapters.length) return null;
-                const cover = chapters.find(node => /^(?:cover|表紙|beginning|先頭)$/i.test(node.textContent.trim()));
+                const cover = chapters.find(node => /^(?:cover|front\s*cover|book\s*cover|表紙|カバー|書影|beginning|先頭)$/i.test(node.textContent.trim()));
                 const chosen = cover || chapters[0];
                 return { index: entries.indexOf(chosen), isCover: Boolean(cover) };
             }""", {"selector": entry_selector})
@@ -3270,10 +3270,12 @@ def fetch_via_browser(
                         if is_reader_oops(page):
                             continue
                         for rewind_try in range(2):
-                            initial_pos = get_reader_position(page)
-                            initial_pct = get_reader_progress_percent(page)
-                            if not is_reader_not_at_start(page) and initial_pos is not None and initial_pos[1] <= 1:
-                                break
+                            # Always run rewind_reader_to_start on the first attempt even if already at Page 1 / 0%,
+                            # because some Kindle books place the Cover before Page 1 and only make it reachable via TOC.
+                            if rewind_try > 0:
+                                initial_pos = get_reader_position(page)
+                                if not is_reader_not_at_start(page) and (initial_pos is None or initial_pos[1] <= 1):
+                                    break
                             rewind_reader_to_start(page, turn_key)
                             dismiss_reader_dialogs(page)
                             if is_reader_oops(page):
