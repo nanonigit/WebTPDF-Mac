@@ -1643,9 +1643,19 @@ def check_reader_completeness(
     last_page: int | None,
     last_percent: int | None,
     max_pages: int,
+    skipped_blank_steps: int = 0,
 ) -> None:
     if expected_pages is not None:
-        incomplete = (last_page < expected_pages) if last_page is not None else (page_count < expected_pages)
+        if last_page is not None:
+            # Allow a 1-2 page trailing margin at >=98% (e.g. intentionally blank verso or Kindle end-of-book screen)
+            # as well as skipped intentionally blank pages.
+            at_tail = (
+                (last_page + skipped_blank_steps >= expected_pages)
+                or (last_percent is not None and last_percent >= 98 and last_page >= expected_pages - max(2, skipped_blank_steps))
+            )
+            incomplete = not at_tail
+        else:
+            incomplete = (page_count + skipped_blank_steps) < expected_pages
     else:
         incomplete = last_percent is not None and last_percent < 95
     if incomplete:
@@ -2134,13 +2144,33 @@ def _take_screenshot_resilient(
     timeout_ms: int = 12000,
     cdp_session=None,
 ) -> bytes:
-    """Take a screenshot, falling back to CDP Page.captureScreenshot when Playwright stalls on 'waiting for fonts to load'."""
+    """Take a screenshot, clamping clip bounds to the viewport and falling back to CDP Page.captureScreenshot."""
+    safe_clip = clip
+    if safe_clip is not None:
+        try:
+            vp = page.viewport_size
+            if vp and vp.get("width") and vp.get("height"):
+                vp_w = float(vp["width"])
+                vp_h = float(vp["height"])
+                x = max(0.0, float(safe_clip["x"]))
+                y = max(0.0, float(safe_clip["y"]))
+                x2 = min(vp_w, float(safe_clip["x"]) + float(safe_clip["width"]))
+                y2 = min(vp_h, float(safe_clip["y"]) + float(safe_clip["height"]))
+                if x2 - x >= 10.0 and y2 - y >= 10.0:
+                    safe_clip = {"x": x, "y": y, "width": x2 - x, "height": y2 - y}
+                else:
+                    safe_clip = None
+        except Exception:
+            safe_clip = None
     try:
-        if clip is not None:
-            return page.screenshot(clip=clip, animations="disabled", timeout=timeout_ms)
+        if safe_clip is not None:
+            return page.screenshot(clip=safe_clip, animations="disabled", timeout=timeout_ms)
         return page.screenshot(full_page=False, animations="disabled", timeout=timeout_ms)
     except Exception as exc:
-        if "Timeout" not in type(exc).__name__ and "timeout" not in str(exc).lower():
+        err_low = str(exc).lower()
+        if safe_clip is not None and ("clipped area" in err_low or "outside" in err_low or "empty" in err_low):
+            return page.screenshot(full_page=False, animations="disabled", timeout=timeout_ms)
+        if "Timeout" not in type(exc).__name__ and "timeout" not in err_low:
             raise
         log(f"[Reader] Playwright screenshot timed out ({type(exc).__name__}); falling back to CDP Page.captureScreenshot.")
         import base64
@@ -2148,12 +2178,12 @@ def _take_screenshot_resilient(
         sess = cdp_session or page.context.new_cdp_session(page)
         try:
             params: dict = {"format": "png", "fromSurface": True}
-            if clip is not None:
+            if safe_clip is not None:
                 params["clip"] = {
-                    "x": float(clip["x"]),
-                    "y": float(clip["y"]),
-                    "width": float(clip["width"]),
-                    "height": float(clip["height"]),
+                    "x": float(safe_clip["x"]),
+                    "y": float(safe_clip["y"]),
+                    "width": float(safe_clip["width"]),
+                    "height": float(safe_clip["height"]),
                     "scale": 1.0,
                 }
             res = sess.send("Page.captureScreenshot", params)
@@ -4029,6 +4059,7 @@ def fetch_via_browser(
                     written = merge_pdf_bytes_list(collected_page_pdfs, staged_output)
                     check_reader_completeness(
                         written, expected_total_pages, last_reader_page, last_reader_percent, max_pages,
+                        skipped_blank_steps=skipped_blank_steps,
                     )
                     verify_merged_reader_pdf(collected_page_pdfs, staged_output, written)
                     staged_output.replace(resolved_output)
