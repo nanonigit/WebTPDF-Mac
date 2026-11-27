@@ -2938,7 +2938,12 @@ def resolve_auto_output_path(base_output: Path, title: str | None, pub_date: str
 
 
 def reader_at_last_page(capture: ReaderCapture) -> bool:
-    return capture.total is not None and capture.position == capture.total and capture.percent == 100
+    if capture.total is None or capture.position is None:
+        return False
+    if capture.position >= capture.total and capture.percent == 100:
+        return True
+    # Books whose final page is an intentionally blank/rating screen often stop at total - 1 (98-100%).
+    return capture.percent is not None and capture.percent >= 98 and capture.position >= capture.total - 1
 
 
 def reader_gap_candidates(captures: list[ReaderCapture]) -> list[tuple[int, ReaderCapture, ReaderCapture]]:
