@@ -279,17 +279,30 @@ def normalize_reader_pages_to_cover_size(
                 if not bb:
                     return None
                 # Check if outer edges were dark/black letterbox bars and whether the page looks like
-                # a reflowable white-paper text page (>=75% pure white background, <=10% saturated color).
+                # a reflowable white-paper text page (>=75% pure white background at native 72dpi without
+                # downscale-blurring thin kanji strokes, and <=10% saturated color).
                 gray = im.convert("L")
                 top_val = gray.getpixel((pix.width // 2, 0))
                 bot_val = gray.getpixel((pix.width // 2, pix.height - 1))
                 has_dark_bar = (top_val <= 15 or bot_val <= 15) and (bb[1] > 2 or bb[3] < pix.height - 2)
-                inner_g = gray.resize((64, 96))
-                inner_g_vals = list(inner_g.getdata())
-                pure_white_ratio = sum(1 for v in inner_g_vals if v >= 245) / max(1, len(inner_g_vals))
-                inner_rgb = im.resize((64, 96))
-                colored_ratio = sum(1 for r, g, b in inner_rgb.getdata() if max(r, g, b) - min(r, g, b) > 25) / (64.0 * 96.0)
-                is_text_paper = (not has_dark_bar) and (pure_white_ratio >= 0.75) and (colored_ratio <= 0.10)
+                step_x = max(1, pix.width // 64)
+                step_y = max(1, pix.height // 96)
+                g_px = gray.load()
+                rgb_px = im.load()
+                total_samples = 0
+                white_samples = 0
+                color_samples = 0
+                for sy_i in range(0, pix.height, step_y):
+                    for sx_i in range(0, pix.width, step_x):
+                        total_samples += 1
+                        if g_px[sx_i, sy_i] >= 240:
+                            white_samples += 1
+                        r, g, b = rgb_px[sx_i, sy_i]
+                        if max(r, g, b) - min(r, g, b) > 25:
+                            color_samples += 1
+                pure_white_ratio = white_samples / max(1, total_samples)
+                colored_ratio = color_samples / max(1, total_samples)
+                is_text_paper = (not has_dark_bar) and (pure_white_ratio >= 0.72) and (colored_ratio <= 0.10)
                 crop_g = gray.crop(bb).resize((48, 48))
                 non_white = sum(1 for v in crop_g.getdata() if v < 240)
                 density = non_white / (48.0 * 48.0)
@@ -401,23 +414,56 @@ def normalize_reader_pages_to_cover_size(
                 continue
             rw, rh = sz
             is_cover = (idx == single_indices[0])
+            # On reflowable text books, crop illustrated cover page(s) cleanly to their artwork (0px white bars)
+            # at the book's uniform width out_w instead of letterboxing them inside the taller text-page height.
+            crop_cover_clean = False
+            cover_page_bbox: tuple[float, float, float, float] | None = None
+            if is_reflowable_text_book and idx <= single_indices[0] + 1:
+                cov_info = _non_white_bbox_in_canvas(blob, rw, rh)
+                if cov_info is not None:
+                    cbb, cdens, _, c_is_text = cov_info
+                    if not c_is_text and cdens >= 0.25:
+                        cw = cbb[2] - cbb[0]
+                        ch = cbb[3] - cbb[1]
+                        if cw >= max_w * 0.45 and ch >= max_h * 0.35:
+                            crop_cover_clean = True
+                            cover_page_bbox = cbb
+
             # Only aspect-fit Page 0 when it is a genuine illustrated cover (density >= 0.25),
             # never when Page 0 is a sparse text page (e.g. 3-line disclaimer).
             fit_cover = False
-            if is_cover and cover_bbox is not None and cover_density >= 0.25:
+            if not crop_cover_clean and is_cover and cover_bbox is not None and cover_density >= 0.25:
                 cw = cover_bbox[2] - cover_bbox[0]
                 ch = cover_bbox[3] - cover_bbox[1]
                 if cw >= max_w * 0.45 and ch >= max_h * 0.35 and (cw < out_w * 0.86 or ch < out_h * 0.86):
                     fit_cover = True
 
-            if not trimmed and not fit_cover and abs(rw - out_w) <= 1.0 and abs(rh - out_h) <= 1.0:
+            if not trimmed and not fit_cover and not crop_cover_clean and abs(rw - out_w) <= 1.0 and abs(rh - out_h) <= 1.0:
                 normalized.append(blob)
                 continue
 
             with pymupdf.open(stream=blob, filetype="pdf") as src_doc:
                 out_doc = pymupdf.open()
-                page = out_doc.new_page(width=out_w, height=out_h)
-                if fit_cover and cover_bbox is not None:
+                if crop_cover_clean and cover_page_bbox is not None:
+                    ox = (max_w - rw) / 2.0
+                    oy = (max_h - rh) / 2.0
+                    src_clip = pymupdf.Rect(
+                        max(0.0, cover_page_bbox[0] - ox),
+                        max(0.0, cover_page_bbox[1] - oy),
+                        min(rw, cover_page_bbox[2] - ox),
+                        min(rh, cover_page_bbox[3] - oy),
+                    )
+                    scale = out_w / max(1.0, src_clip.width)
+                    cov_h = round(src_clip.height * scale, 2)
+                    page = out_doc.new_page(width=out_w, height=cov_h)
+                    page.show_pdf_page(
+                        pymupdf.Rect(0.0, 0.0, out_w, cov_h),
+                        src_doc,
+                        0,
+                        clip=src_clip,
+                    )
+                elif fit_cover and cover_bbox is not None:
+                    page = out_doc.new_page(width=out_w, height=out_h)
                     ox = (max_w - rw) / 2.0
                     oy = (max_h - rh) / 2.0
                     src_clip = pymupdf.Rect(
@@ -438,6 +484,7 @@ def normalize_reader_pages_to_cover_size(
                         clip=src_clip,
                     )
                 else:
+                    page = out_doc.new_page(width=out_w, height=out_h)
                     ox = (max_w - rw) / 2.0
                     oy = (max_h - rh) / 2.0
                     # Map uniform canvas crop_rect back to source page coordinates.
