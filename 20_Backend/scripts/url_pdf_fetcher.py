@@ -3254,7 +3254,7 @@ def fetch_via_browser(
                 page = _new_background_page(browser, context)
                 created_page = True
                 if is_reader_url:
-                    asin_match = re.search(r"[?&]asin=([A-Z0-9]+)", start_url, re.I)
+                    asin_match = re.search(r"(?:[?&]asin=|/manga/)([A-Z0-9]+)", start_url, re.I)
                     target_asin = asin_match.group(1).upper() if asin_match else None
                     if target_asin:
                         for other in list(context.pages):
@@ -3409,6 +3409,7 @@ def fetch_via_browser(
 
             collected_page_pdfs = [capture.pdf for capture in saved_pages]
             skipped_blank_steps = restored_skipped_steps
+            consecutive_blank_skips = 0
             prev_hash: str | None = None
             prev_pdf_hash: str | None = None
             last_reader_page: int | None = None
@@ -3795,6 +3796,17 @@ def fetch_via_browser(
                         continue
                     if is_pdf_visually_blank(page_pdf_bytes):
                         if reader_mode and last_reader_image_hash is not None:
+                            if recovery_attempts == 0 and consecutive_blank_skips == 0:
+                                needs_recovery = True
+                                continue
+                            if consecutive_blank_skips < 5:
+                                consecutive_blank_skips += 1
+                                skipped_blank_steps += 1
+                                recovery_attempts = 0
+                                log(f"[Reader] Page {page_idx} confirmed intentionally blank after reload ({consecutive_blank_skips}/5); advancing to next page.")
+                                page.keyboard.press(turn_key)
+                                page.wait_for_timeout(900)
+                                continue
                             needs_recovery = True
                             continue
                         if page_idx == 1:
@@ -3943,6 +3955,7 @@ def fetch_via_browser(
                     if page.url:
                         reader_checkpoint.save_resume_url(page.url, skipped_blank_steps)
                 collected_page_pdfs.append(page_pdf_bytes)
+                consecutive_blank_skips = 0
                 log(f"[Browser] Captured page {page_idx} via PDF command ({len(page_pdf_bytes)} bytes)")
 
                 if len(collected_page_pdfs) == max_pages:
