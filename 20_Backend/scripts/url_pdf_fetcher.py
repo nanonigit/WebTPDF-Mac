@@ -1651,6 +1651,7 @@ def check_reader_completeness(
             # as well as skipped intentionally blank pages.
             at_tail = (
                 (last_page + skipped_blank_steps >= expected_pages)
+                or (expected_pages > 0 and (last_page / expected_pages) >= 0.98)
                 or (last_percent is not None and last_percent >= 98 and last_page >= expected_pages - max(2, skipped_blank_steps))
             )
             incomplete = not at_tail
@@ -2943,7 +2944,10 @@ def reader_at_last_page(capture: ReaderCapture, saved_count: int | None = None) 
     if capture.position is not None:
         if capture.position >= capture.total and capture.percent == 100:
             return True
-        # Books whose final page is an intentionally blank/rating screen often stop at total - 1 (98-100%).
+        # Books whose final page is an intentionally blank/rating screen or Location-based tail
+        # (e.g. Location 2472 of 2478 = 99.8%) often stop within the final 2%.
+        if capture.total > 0 and (capture.position / capture.total) >= 0.98:
+            return True
         if capture.percent is not None and capture.percent >= 98 and capture.position >= capture.total - 1:
             return True
     # When Kindle hides the footer near the end (position=None, stale percent),
@@ -3908,8 +3912,30 @@ def fetch_via_browser(
                             current_pdf_hash = prev_pdf_hash
                     if reader_mode:
                         next_chevron = "#kr-chevron-left, [data-testid='chevron-left']" if turn_key == "ArrowLeft" else "#kr-chevron-right, [data-testid='chevron-right']"
-                        for pdf_retry in range(3):
-                            log(f"[Reader] Page {page_idx} PDF content unchanged; retrying turn ({pdf_retry + 1}/3)...")
+                        at_book_end = (
+                            (last_reader_percent is not None and last_reader_percent >= 98)
+                            or (
+                                expected_total_pages is not None
+                                and expected_total_pages > 0
+                                and last_reader_page is not None
+                                and (last_reader_page / expected_total_pages) >= 0.98
+                            )
+                        )
+                        if not at_book_end:
+                            try:
+                                chev_check = page.locator(next_chevron).first
+                                if chev_check.count() == 0 or not chev_check.is_visible():
+                                    # When Kindle hides the forward chevron and we are past 90%, we are at the true last page.
+                                    if (
+                                        (last_reader_percent is not None and last_reader_percent >= 90)
+                                        or (expected_total_pages and last_reader_page and (last_reader_page / expected_total_pages) >= 0.90)
+                                    ):
+                                        at_book_end = True
+                            except Exception:
+                                pass
+                        max_pdf_retries = 1 if at_book_end else 3
+                        for pdf_retry in range(max_pdf_retries):
+                            log(f"[Reader] Page {page_idx} PDF content unchanged; retrying turn ({pdf_retry + 1}/{max_pdf_retries})...")
                             dismiss_reader_dialogs(page)
                             source = page.evaluate(READER_PAGE_SOURCE)
                             if pdf_retry == 0:
@@ -3919,12 +3945,18 @@ def fetch_via_browser(
                                 if not turned:
                                     try:
                                         chev = page.locator(next_chevron).first
-                                        if chev.count() > 0:
+                                        if chev.count() > 0 and chev.is_visible():
                                             chev.click(force=True, timeout=1500)
                                             page.wait_for_timeout(600)
                                     except Exception:
                                         pass
-                            elif pdf_retry == 1 and last_reader_page is not None and expected_total_pages is not None and last_reader_page < expected_total_pages:
+                            elif (
+                                pdf_retry == 1
+                                and not at_book_end
+                                and last_reader_page is not None
+                                and expected_total_pages is not None
+                                and last_reader_page < expected_total_pages
+                            ):
                                 # 2nd retry: jump directly to next page/location number via Go to Page / Location.
                                 log(f"[Reader] Turn stuck at {last_reader_page}/{expected_total_pages}; trying direct jump to {last_reader_page + 1}...")
                                 try:
@@ -3937,8 +3969,13 @@ def fetch_via_browser(
                                     except Exception:
                                         pass
                             else:
-                                # 3rd retry: try TOC next chapter if still before the end, else click chevron + key.
-                                if expected_total_pages is not None and last_reader_page is not None and last_reader_page < expected_total_pages:
+                                # 3rd retry: try TOC next chapter if still well before the end, else stop cleanly.
+                                if (
+                                    not at_book_end
+                                    and expected_total_pages is not None
+                                    and last_reader_page is not None
+                                    and last_reader_page < expected_total_pages
+                                ):
                                     log("[Reader] Direct jump did not advance; trying next chapter via Table of Contents...")
                                     try:
                                         _reveal_reader_toolbar(page)
