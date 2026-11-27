@@ -3043,7 +3043,7 @@ def detect_reader_reflowable(page) -> bool | None:
                         const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
                         const isAa = (
                             /^Aa$/i.test(text) ||
-                            /(?:font|フォント|文字サイズ)/i.test(label)
+                            /(?:top_menu_reader_settings|reader\s*settings|font|フォント|文字サイズ)/i.test(label)
                         );
                         if (!isAa) continue;
                         sawToolbar = true;
@@ -3446,14 +3446,24 @@ def fetch_via_browser(
                                 break
                             after_pos = get_reader_position(page)
                             after_pct = get_reader_progress_percent(page)
-                            if (after_pos is None or after_pos[1] <= 1) and (after_pct is None or after_pct <= 1):
+                            at_start = (
+                                (after_pct is not None and after_pct == 0)
+                                or (after_pos is None and (after_pct is None or after_pct <= 1))
+                                or (after_pos is not None and after_pos[0] == "page" and after_pos[1] <= 1)
+                                or (after_pos is not None and after_pos[0] == "location" and after_pos[1] <= 25 and (after_pct is None or after_pct <= 1))
+                            )
+                            if at_start:
                                 break
                             log(f"[Reader] Still not at cover after rewind {rewind_try + 1}/2 (pos={after_pos}, pct={after_pct}).")
                         if is_reader_oops(page):
                             continue
                         verify_pos = get_reader_position(page)
                         verify_pct = get_reader_progress_percent(page)
-                        if (verify_pos is not None and verify_pos[1] > 2) or (verify_pct is not None and verify_pct >= 5):
+                        still_far_from_start = (
+                            (verify_pct is not None and verify_pct >= 5)
+                            or (verify_pos is not None and verify_pos[0] == "page" and verify_pos[1] > 2 and (verify_pct is None or verify_pct > 0))
+                        )
+                        if still_far_from_start:
                             raise RuntimeError(
                                 f"表紙（1ページ目）まで戻れませんでした（現在位置: {verify_pos[1] if verify_pos else '?'} / {verify_pct if verify_pct is not None else '?'}%）。再ダウンロードしてください。"
                             )
