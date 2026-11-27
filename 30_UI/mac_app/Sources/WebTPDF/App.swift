@@ -223,8 +223,8 @@ final class AppModel: ObservableObject {
     }
 
     enum URLToPDFSectionID: String, Codable, CaseIterable, Identifiable {
-        case activeJob
         case captureSettings
+        case activeJob
         case queue
         case history
         case log
@@ -548,7 +548,7 @@ final class AppModel: ObservableObject {
         var result = decoded.filter { seen.insert($0).inserted }
         for id in fallback where !seen.contains(id) {
             if id == .activeJob {
-                result.insert(id, at: 0)
+                result.insert(id, at: min(1, result.count))
             } else {
                 result.append(id)
             }
