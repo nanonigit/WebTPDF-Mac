@@ -1313,7 +1313,7 @@ final class AppModel: ObservableObject {
     }
 
     func sortedQueueIndices() -> [Int] {
-        let running = pdfQueue.indices.filter { pdfQueue[$0].status == .running }
+        // Exclude currently running item from the queue list since it is displayed in "現在の作業状況".
         let rest = pdfQueue.indices.filter { pdfQueue[$0].status != .running }
         let orderedRest: [Int]
         switch queueSortOrder {
@@ -1339,7 +1339,7 @@ final class AppModel: ObservableObject {
                 return lhs < rhs
             }
         }
-        return running + orderedRest
+        return orderedRest
     }
 
     func removeDuplicateQueueItems() {
@@ -3811,7 +3811,7 @@ struct ContentView: View {
     private func urlToPDFSectionTitle(_ sectionID: AppModel.URLToPDFSectionID) -> String {
         switch sectionID {
         case .queue:
-            return model.t("実行キュー (\(model.pdfQueue.count)件)", "Execution Queue (\(model.pdfQueue.count))")
+            return model.t("実行キュー (\(model.sortedQueueIndices().count)件)", "Execution Queue (\(model.sortedQueueIndices().count))")
         case .history:
             return model.t("取得履歴 (\(model.sortedFilteredHistory().count)件)", "Fetch History (\(model.sortedFilteredHistory().count))")
         default:
@@ -3997,7 +3997,11 @@ struct ContentView: View {
                 }
 
                 if pageIndices.isEmpty {
-                    Text(model.t("URLとページ送り方向（← / →）を選んで「＋ キューに追加」を押すと、順番に自動でPDF化できます。", "Choose a URL and arrow direction (← / →), then click '+ Add to Queue' to process them sequentially."))
+                    Text(
+                        model.pdfQueue.contains(where: { $0.status == .running })
+                            ? model.t("待機中のキューはありません（実行中の本は上の「現在の作業状況」に表示されています）。", "No pending items in queue (the active book is shown in Active Job above).")
+                            : model.t("URLとページ送り方向（← / →）を選んで「＋ キューに追加」を押すと、順番に自動でPDF化できます。", "Choose a URL and arrow direction (← / →), then click '+ Add to Queue' to process them sequentially.")
+                    )
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 4)
