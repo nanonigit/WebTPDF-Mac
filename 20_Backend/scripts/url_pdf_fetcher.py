@@ -1967,14 +1967,53 @@ def matches_saved_reader_image(screenshot: bytes, saved_pdf: bytes, *, same_prin
         return False
 
 
-def _capture_clean_reader_frame(page, timeout_ms: int = 15000) -> bytes | None:
+def _take_screenshot_resilient(
+    page,
+    *,
+    clip: dict | None = None,
+    timeout_ms: int = 12000,
+    cdp_session=None,
+) -> bytes:
+    """Take a screenshot, falling back to CDP Page.captureScreenshot when Playwright stalls on 'waiting for fonts to load'."""
+    try:
+        if clip is not None:
+            return page.screenshot(clip=clip, animations="disabled", timeout=timeout_ms)
+        return page.screenshot(full_page=False, animations="disabled", timeout=timeout_ms)
+    except Exception as exc:
+        if "Timeout" not in type(exc).__name__ and "timeout" not in str(exc).lower():
+            raise
+        log(f"[Reader] Playwright screenshot timed out ({type(exc).__name__}); falling back to CDP Page.captureScreenshot.")
+        import base64
+
+        sess = cdp_session or page.context.new_cdp_session(page)
+        try:
+            params: dict = {"format": "png", "fromSurface": True}
+            if clip is not None:
+                params["clip"] = {
+                    "x": float(clip["x"]),
+                    "y": float(clip["y"]),
+                    "width": float(clip["width"]),
+                    "height": float(clip["height"]),
+                    "scale": 1.0,
+                }
+            res = sess.send("Page.captureScreenshot", params)
+            return base64.b64decode(res["data"])
+        finally:
+            if cdp_session is None:
+                try:
+                    sess.detach()
+                except Exception:
+                    pass
+
+
+def _capture_clean_reader_frame(page, timeout_ms: int = 12000) -> bytes | None:
     """Capture the Reader page view with Kindle UI chrome hidden, matching normal page capture."""
     _hide_reader_chrome(page)
     try:
         box = _find_reader_page_box(page)
         if box is None:
             return None
-        return page.screenshot(clip=box, timeout=timeout_ms)
+        return _take_screenshot_resilient(page, clip=box, timeout_ms=timeout_ms)
     finally:
         _restore_reader_chrome(page)
 
@@ -2373,7 +2412,7 @@ def capture_reader_page_as_pdf_bytes(
         box = _find_reader_page_box(page)
         if not box:
             return None
-        png_bytes = page.screenshot(clip=box, timeout=15000)
+        png_bytes = _take_screenshot_resilient(page, clip=box, timeout_ms=12000, cdp_session=cdp_session)
     finally:
         _restore_reader_chrome(page)
 
@@ -2730,7 +2769,7 @@ def reader_frame_matches(page, saved: ReaderCapture) -> bool:
         box = _find_reader_page_box(page)
         if box is None:
             return False
-        frame = page.screenshot(clip=box, timeout=15000)
+        frame = _take_screenshot_resilient(page, clip=box, timeout_ms=12000)
     finally:
         _restore_reader_chrome(page)
     return (
