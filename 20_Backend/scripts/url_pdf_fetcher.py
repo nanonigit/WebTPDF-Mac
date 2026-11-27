@@ -3253,6 +3253,21 @@ def fetch_via_browser(
             if page is None:
                 page = _new_background_page(browser, context)
                 created_page = True
+                if is_reader_url:
+                    asin_match = re.search(r"[?&]asin=([A-Z0-9]+)", start_url, re.I)
+                    target_asin = asin_match.group(1).upper() if asin_match else None
+                    if target_asin:
+                        for other in list(context.pages):
+                            if other == page:
+                                continue
+                            try:
+                                other_url = (other.url or "").upper()
+                                if "READ.AMAZON." in other_url and target_asin in other_url:
+                                    other_tid = _get_cdp_target_id(context, other)
+                                    _close_page_safely(other, active_cdp_url, other_tid)
+                                    log(f"[Reader] Closed duplicate open tab for ASIN {target_asin} to prevent Kindle reader conflict.")
+                            except Exception:
+                                pass
                 page_target_id = _get_cdp_target_id(context, page)
         else:
             browser = p.chromium.launch(headless=True)
