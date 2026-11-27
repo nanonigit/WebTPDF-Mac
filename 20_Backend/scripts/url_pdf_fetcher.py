@@ -4142,14 +4142,26 @@ def main() -> int:
                         quality=args.quality,
                     )
                     break
-                except ReaderStepTimeout:
+                except (ReaderStepTimeout, Exception) as exc:
+                    if isinstance(exc, (CaptureCanceled, ValueError, IncompleteReaderCapture)):
+                        raise
+                    exc_text = f"{type(exc).__name__}: {exc}".lower()
+                    is_recoverable_timeout = (
+                        isinstance(exc, ReaderStepTimeout)
+                        or "timeout" in exc_text
+                        or "target closed" in exc_text
+                        or "execution context" in exc_text
+                        or "connection closed" in exc_text
+                    )
+                    if not is_recoverable_timeout:
+                        raise
                     after_count, _ = checkpoint.progress()
                     if after_count > before_count:
                         consecutive_stalls = 0
                     consecutive_stalls += 1
                     if consecutive_stalls > 3:
                         raise
-                    log(f"[Reader] Page stalled for 60s at {after_count} saved page(s); auto-resuming in a fresh tab ({consecutive_stalls}/3)...")
+                    log(f"[Reader] Transient timeout/error ({type(exc).__name__}) at {after_count} saved page(s); auto-resuming in a fresh tab ({consecutive_stalls}/3)...")
                     time.sleep(3)
         elif args.auto_name and not args.no_browser:
             # Allow fetch_and_merge / fetch_via_browser to resolve final output path
