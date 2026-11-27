@@ -334,10 +334,14 @@ final class AppModel: ObservableObject {
         }
 
         var isIncomplete: Bool {
-            guard let expectedPages else { return false }
+            guard let expectedPages, expectedPages > 0 else { return false }
             let actual = lastPrintedPage ?? pageCount
             guard let actual else { return false }
-            return actual < expectedPages
+            // Match backend end-of-book tolerance: Location-based books (e.g. 2472/2478 = 99.8%)
+            // and books ending 1 page before a trailing blank/rating screen are complete.
+            if actual >= expectedPages - 1 { return false }
+            if Double(actual) / Double(expectedPages) >= 0.98 { return false }
+            return true
         }
 
         var hasWarning: Bool {
