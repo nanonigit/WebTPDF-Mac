@@ -3848,6 +3848,15 @@ struct ContentView: View {
                             Spacer()
                         }
 
+                        HStack(spacing: 6) {
+                            Image(systemName: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(model.t("※ Kindle は「白背景」テーマで取得してください（余白・表紙の自動調整が正しく動作します）", "* Please use Kindle's White background theme for accurate margin & cover auto-adjustment."))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
                         HStack(spacing: 10) {
                             Text(model.t("③ 保存先フォルダ", "③ Save Folder"))
                                 .font(.callout)
