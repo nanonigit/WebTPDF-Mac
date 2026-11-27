@@ -278,16 +278,18 @@ def normalize_reader_pages_to_cover_size(
                 bb = _content_bbox_stripping_letterbox(im)
                 if not bb:
                     return None
-                # Check if outer edges were dark/black letterbox bars and whether top/bottom edges are white paper.
+                # Check if outer edges were dark/black letterbox bars and whether the page looks like
+                # a reflowable white-paper text page (>=75% pure white background, <=10% saturated color).
                 gray = im.convert("L")
                 top_val = gray.getpixel((pix.width // 2, 0))
                 bot_val = gray.getpixel((pix.width // 2, pix.height - 1))
                 has_dark_bar = (top_val <= 15 or bot_val <= 15) and (bb[1] > 2 or bb[3] < pix.height - 2)
-                step_x = max(1, pix.width // 32)
-                edge_xs = list(range(0, pix.width, step_x))
-                edge_top_white = sum(1 for x in edge_xs if gray.getpixel((x, 0)) >= 245) / max(1, len(edge_xs))
-                edge_bot_white = sum(1 for x in edge_xs if gray.getpixel((x, pix.height - 1)) >= 245) / max(1, len(edge_xs))
-                is_white_edge = (not has_dark_bar) and (edge_top_white >= 0.85) and (edge_bot_white >= 0.85)
+                inner_g = gray.crop(bb).resize((64, 96))
+                inner_g_vals = list(inner_g.getdata())
+                pure_white_ratio = sum(1 for v in inner_g_vals if v >= 245) / max(1, len(inner_g_vals))
+                inner_rgb = im.crop(bb).resize((64, 96))
+                colored_ratio = sum(1 for r, g, b in inner_rgb.getdata() if max(r, g, b) - min(r, g, b) > 25) / (64.0 * 96.0)
+                is_text_paper = (not has_dark_bar) and (pure_white_ratio >= 0.75) and (colored_ratio <= 0.10)
                 crop_g = gray.crop(bb).resize((48, 48))
                 non_white = sum(1 for v in crop_g.getdata() if v < 240)
                 density = non_white / (48.0 * 48.0)
@@ -295,7 +297,7 @@ def normalize_reader_pages_to_cover_size(
                 sy = rh / pix.height
                 ox = (max_w - rw) / 2.0
                 oy = (max_h - rh) / 2.0
-                return (ox + bb[0] * sx, oy + bb[1] * sy, ox + bb[2] * sx, oy + bb[3] * sy), density, has_dark_bar, is_white_edge
+                return (ox + bb[0] * sx, oy + bb[1] * sy, ox + bb[2] * sx, oy + bb[3] * sy), density, has_dark_bar, is_text_paper
 
         cover_bbox: tuple[float, float, float, float] | None = None
         cover_density: float = 0.0
@@ -354,18 +356,17 @@ def normalize_reader_pages_to_cover_size(
 
         base_w = crop_x1 - crop_x0
         base_h = crop_y1 - crop_y0
-        # For reflowable white-background text books where body text sits flush against the top/bottom edges,
+        # For confirmed reflowable white-paper text books where body text sits flush against top/bottom edges,
         # extend the white canvas vertically to guarantee a comfortable ~5.5% top & bottom reading margin
         # (EBPAJ vertical-Japanese ebook guideline recommends 5-10% vertical breathing room).
-        # Never add extra margins to fixed-layout books (comics, scores, print-replica PDFs).
+        # Never add extra margins to fixed-layout books (magazines, comics, scores, print-replica PDFs).
         extra_top = 0.0
         extra_bot = 0.0
-        white_edge_threshold = 0.6 if is_reflowable is True else 0.8
         if (
-            is_reflowable is not False
+            is_reflowable is True
             and not has_any_dark_bar
             and body_sample_total > 0
-            and (body_white_edge_count / body_sample_total) >= white_edge_threshold
+            and (body_white_edge_count / body_sample_total) >= 0.70
             and body_bboxes
         ):
             body_top_spaces = sorted(max(0.0, b[1] - crop_y0) for b in body_bboxes)
@@ -3008,7 +3009,7 @@ def detect_reader_reflowable(page) -> bool | None:
                         const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
                         const isAa = (
                             /^Aa$/i.test(text) ||
-                            /(?:font|display\s*setting|reader\s*setting|text\s*setting|フォント|表示設定|文字サイズ|レイアウト)/i.test(label)
+                            /(?:font|フォント|文字サイズ)/i.test(label)
                         );
                         if (!isAa) continue;
                         sawToolbar = true;
