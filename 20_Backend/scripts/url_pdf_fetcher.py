@@ -383,6 +383,7 @@ def normalize_reader_pages_to_cover_size(
         # Never add extra margins to fixed-layout books (magazines, comics, scores, print-replica PDFs).
         extra_top = 0.0
         extra_bot = 0.0
+        extra_left = 0.0
         if is_reflowable_text_book and body_bboxes:
             body_top_spaces = sorted(max(0.0, b[1] - crop_y0) for b in body_bboxes)
             body_bot_spaces = sorted(max(0.0, crop_y1 - b[3]) for b in body_bboxes)
@@ -396,13 +397,28 @@ def normalize_reader_pages_to_cover_size(
             if extra_bot < 2.0:
                 extra_bot = 0.0
 
-        out_w = round(base_w, 2)
         out_h = round(base_h + extra_top + extra_bot, 2)
+        out_w = round(base_w, 2)
+        if is_reflowable_text_book:
+            # Preserve the Cover's natural book aspect ratio (e.g. ~1:1.47) by adding symmetric
+            # horizontal white paper margin so vertical reading margins never make body pages skinny.
+            target_aspect = base_h / max(1.0, base_w)
+            if cover_bbox is not None and cover_density >= 0.25:
+                cw = cover_bbox[2] - cover_bbox[0]
+                ch = cover_bbox[3] - cover_bbox[1]
+                if cw >= max_w * 0.45 and ch >= max_h * 0.35:
+                    target_aspect = min(2.1, max(0.65, ch / max(1.0, cw)))
+            matched_w = round(out_h / max(0.5, target_aspect), 2)
+            if matched_w > out_w + 1.0:
+                extra_left = round((matched_w - out_w) / 2.0, 2)
+                out_w = matched_w
+
         trimmed = (
             crop_x0 > 0.5
             or crop_y0 > 0.5
             or extra_top > 0.5
             or extra_bot > 0.5
+            or extra_left > 0.5
             or abs(out_w - max_w) > 1.0
             or abs(out_h - max_h) > 1.0
         )
@@ -492,9 +508,9 @@ def normalize_reader_pages_to_cover_size(
                     src_y0 = max(0.0, crop_y0 - oy)
                     src_x1 = min(rw, crop_x1 - ox)
                     src_y1 = min(rh, crop_y1 - oy)
-                    dest_x0 = (ox + src_x0) - crop_x0
+                    dest_x0 = (ox + src_x0) - crop_x0 + extra_left
                     dest_y0 = (oy + src_y0) - crop_y0 + extra_top
-                    dest_x1 = (ox + src_x1) - crop_x0
+                    dest_x1 = (ox + src_x1) - crop_x0 + extra_left
                     dest_y1 = (oy + src_y1) - crop_y0 + extra_top
                     page.show_pdf_page(
                         pymupdf.Rect(dest_x0, dest_y0, dest_x1, dest_y1),
