@@ -1086,6 +1086,12 @@ def _detect_chevron_turn_key(page) -> str | None:
         detected = page.evaluate("""() => {
             const left = document.querySelector('#kr-chevron-left, [data-testid="chevron-left"]');
             const right = document.querySelector('#kr-chevron-right, [data-testid="chevron-right"]');
+            const isVisible = (el) => {
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = window.getComputedStyle(el);
+                return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+            };
             const label = (el) => {
                 if (!el) return '';
                 return [
@@ -1094,6 +1100,8 @@ def _detect_chevron_turn_key(page) -> str | None:
                     el.textContent || '',
                 ].join(' ').toLowerCase();
             };
+            const lVis = isVisible(left);
+            const rVis = isVisible(right);
             const lText = label(left);
             const rText = label(right);
             const isNext = (s) => s.includes('next') || s.includes('次');
@@ -1102,6 +1110,9 @@ def _detect_chevron_turn_key(page) -> str | None:
             if (isNext(rText) && !isNext(lText)) return 'ArrowRight';
             if (isPrev(rText) && !isPrev(lText)) return 'ArrowLeft';
             if (isPrev(lText) && !isPrev(rText)) return 'ArrowRight';
+            // At the very first page (Cover), only the forward chevron is visible.
+            if (lVis && !rVis) return 'ArrowLeft';
+            if (rVis && !lVis) return 'ArrowRight';
             return null;
         }""")
         if detected in ("ArrowLeft", "ArrowRight"):
@@ -1148,20 +1159,30 @@ def detect_reader_turn_direction(page, current_turn_key: str) -> str:
             moved = True
 
         if moved:
-            # Step back to the starting page before returning.
+            # Step back to the starting page before returning; if reverse key cannot return to cover
+            # (some Kindle books block stepping back onto cover via arrow keys), jump back via TOC/Location 1.
+            def _restore_start_page(back_key: str) -> None:
+                page.keyboard.press(back_key)
+                page.wait_for_timeout(500)
+                if hash0 is not None:
+                    f_back = _capture_clean_reader_frame(page, timeout_ms=5000)
+                    if f_back is not None and hashlib.sha256(f_back).hexdigest() != hash0:
+                        _reveal_reader_toolbar(page)
+                        _, got_cover = jump_to_reader_toc_start(page)
+                        if not got_cover:
+                            seek_reader_position(page, 1, target_is_printed_page=False)
+                        page.wait_for_timeout(400)
+
             if pos0 is not None and pos1 is not None and pos1[1] < pos0[1]:
-                page.keyboard.press(reverse_key)
-                page.wait_for_timeout(400)
+                _restore_start_page(reverse_key)
                 log(f"[Reader] Auto-corrected turn direction (position decreased): {current_turn_key} -> {reverse_key}")
                 return reverse_key
             if pct0 is not None and pct1 is not None and pct1 < pct0:
-                page.keyboard.press(reverse_key)
-                page.wait_for_timeout(400)
+                _restore_start_page(reverse_key)
                 log(f"[Reader] Auto-corrected turn direction (progress decreased): {current_turn_key} -> {reverse_key}")
                 return reverse_key
             # Current key advanced forward — step back once so capture starts at page 1.
-            page.keyboard.press(reverse_key)
-            page.wait_for_timeout(400)
+            _restore_start_page(reverse_key)
             return current_turn_key
 
         # Pressing current_turn_key did nothing (likely at page 1 with wrong direction); probe reverse_key.
@@ -1248,12 +1269,15 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
         except Exception:
             pass
         return
-    if not jumped_by_nav:
+    if not clicked_explicit_cover:
+        # Even when TOC succeeded (e.g. TOC starts at "はじめに" / "目次" without a "表紙" entry),
+        # ALWAYS try jumping directly to Location 1 first so books whose cover sits before Page 1
+        # land straight on the cover before stepping backward.
         _reveal_reader_toolbar(page)
         for prefer_page in (False, True):
             try:
                 if seek_reader_position(page, 1, target_is_printed_page=prefer_page):
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(600)
                     jumped_by_nav = True
                     log(f"[Reader] Jumped near start via {'Page' if prefer_page else 'Location'} 1.")
                     break
@@ -1263,7 +1287,7 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
                 except Exception:
                     pass
     # Even after TOC/Location 1 jump, always close any toolbar/menu and step backward until we truly hit the cover
-    # (TOC often lands on page 2-4 like "Characters" or "Intro", which can still show 0%-1% or Location 2-3).
+    # (TOC often lands on page 2-4 like "Characters" or "Intro", which can still show 0%-1% or Page 1).
     try:
         page.keyboard.press("Escape")
         page.wait_for_timeout(300)
@@ -1283,13 +1307,10 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
         dismiss_reader_dialogs(page)
         prev_pos = get_reader_position(page)
         prev_src = page.evaluate(READER_PAGE_SOURCE)
-        prev_frame_hash = None
-        if not prev_src:
-            frame = _capture_clean_reader_frame(page, timeout_ms=5000)
-            if frame is not None:
-                prev_frame_hash = hashlib.sha256(frame).hexdigest()
+        prev_frame = _capture_clean_reader_frame(page, timeout_ms=5000)
+        prev_frame_hash = hashlib.sha256(prev_frame).hexdigest() if prev_frame is not None else None
         page.keyboard.press(reverse_key)
-        page.wait_for_timeout(350)
+        page.wait_for_timeout(550)
         changed = False
         if prev_src:
             changed = wait_for_reader_turn(page, prev_src, timeout_ms=1200)
@@ -1300,19 +1321,30 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
             frame2 = _capture_clean_reader_frame(page, timeout_ms=5000)
             if frame2 is not None and hashlib.sha256(frame2).hexdigest() != prev_frame_hash:
                 changed = True
-        # If keyboard didn't move and we know we're still past page 1, try clicking the reverse chevron directly.
-        if not changed and (cur_pos is None or cur_pos[1] > 1):
+            elif frame2 is not None:
+                # Cover images can take slightly longer to paint after turning from a text page; re-check once.
+                page.wait_for_timeout(450)
+                frame3 = _capture_clean_reader_frame(page, timeout_ms=5000)
+                if frame3 is not None and hashlib.sha256(frame3).hexdigest() != prev_frame_hash:
+                    changed = True
+        # If keyboard didn't move, ALWAYS try clicking the reverse chevron if it is still visible
+        # (on Kindle Web Reader, the reverse chevron disappears only at the true cover, even if footer says Page 1).
+        if not changed:
             try:
                 chev = page.locator(reverse_chevron).first
-                if chev.count() > 0:
+                if chev.count() > 0 and chev.is_visible():
                     chev.click(force=True, timeout=1500)
-                    page.wait_for_timeout(450)
+                    page.wait_for_timeout(600)
                     cur_pos2 = get_reader_position(page)
                     if cur_pos2 is not None and prev_pos is not None and cur_pos2 != prev_pos:
                         changed = True
                         cur_pos = cur_pos2
                     elif prev_src and (page.evaluate(READER_PAGE_SOURCE) or "") != prev_src:
                         changed = True
+                    elif prev_frame_hash is not None:
+                        frame4 = _capture_clean_reader_frame(page, timeout_ms=5000)
+                        if frame4 is not None and hashlib.sha256(frame4).hexdigest() != prev_frame_hash:
+                            changed = True
             except Exception:
                 pass
         if changed:
@@ -1321,7 +1353,7 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
                 log(f"[Reader] Rewinding to cover... step {step + 1} (pos={cur_pos})")
         else:
             unchanged += 1
-            page.wait_for_timeout(250)
+            page.wait_for_timeout(300)
             if unchanged >= 2:
                 log(f"[Reader] Reached true cover ({cur_pos}) after {step + 1} backward step(s).")
                 return
