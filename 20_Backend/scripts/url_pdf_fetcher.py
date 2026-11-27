@@ -1655,7 +1655,7 @@ def check_reader_completeness(
             )
             incomplete = not at_tail
         else:
-            incomplete = (page_count + skipped_blank_steps) < expected_pages
+            incomplete = (page_count + max(1, skipped_blank_steps)) < expected_pages
     else:
         incomplete = last_percent is not None and last_percent < 95
     if incomplete:
@@ -2937,13 +2937,20 @@ def resolve_auto_output_path(base_output: Path, title: str | None, pub_date: str
     return base_output
 
 
-def reader_at_last_page(capture: ReaderCapture) -> bool:
-    if capture.total is None or capture.position is None:
+def reader_at_last_page(capture: ReaderCapture, saved_count: int | None = None) -> bool:
+    if capture.total is None:
         return False
-    if capture.position >= capture.total and capture.percent == 100:
+    if capture.position is not None:
+        if capture.position >= capture.total and capture.percent == 100:
+            return True
+        # Books whose final page is an intentionally blank/rating screen often stop at total - 1 (98-100%).
+        if capture.percent is not None and capture.percent >= 98 and capture.position >= capture.total - 1:
+            return True
+    # When Kindle hides the footer near the end (position=None, stale percent),
+    # having already captured total - 1 or more pages (e.g. 193/194 after skipping 1 blank page) means the book is complete.
+    if saved_count is not None and saved_count >= capture.total - 1:
         return True
-    # Books whose final page is an intentionally blank/rating screen often stop at total - 1 (98-100%).
-    return capture.percent is not None and capture.percent >= 98 and capture.position >= capture.total - 1
+    return False
 
 
 def reader_gap_candidates(captures: list[ReaderCapture]) -> list[tuple[int, ReaderCapture, ReaderCapture]]:
@@ -3266,7 +3273,7 @@ def fetch_via_browser(
     scale_factor = 2 if quality == "high" else 1
     turn_key = "ArrowLeft" if direction == "left" else "ArrowRight"
     saved_captures = reader_checkpoint.load() if reader_checkpoint and reader_checkpoint.path.exists() else []
-    if saved_captures and reader_at_last_page(saved_captures[-1]):
+    if saved_captures and reader_at_last_page(saved_captures[-1], saved_count=len(saved_captures)):
         return finish_reader_at_end(start_url, output_path, turn_key, reader_checkpoint, saved_captures, result_details)
 
     from playwright.sync_api import sync_playwright
@@ -4055,7 +4062,7 @@ def fetch_via_browser(
                 written = merge_pdf_bytes_list(captured_pdfs, resolved_output)
             elif reader_mode and reader_checkpoint is not None:
                 captures = reader_checkpoint.load()
-                if captures and reader_at_last_page(captures[-1]):
+                if captures and reader_at_last_page(captures[-1], saved_count=len(captures)):
                     return finish_reader_at_end(start_url, resolved_output, turn_key, reader_checkpoint, captures, result_details, is_reflowable=reader_is_reflowable)
                 collected_page_pdfs = normalize_reader_pages_to_cover_size(collected_page_pdfs, is_reflowable=reader_is_reflowable)
                 resolved_output.parent.mkdir(parents=True, exist_ok=True)
