@@ -4603,6 +4603,8 @@ def main() -> int:
                         or "target closed" in exc_text
                         or "execution context" in exc_text
                         or "connection closed" in exc_text
+                        or "connect_over_cdp" in exc_text
+                        or "browser context management" in exc_text
                     )
                     if not is_recoverable_timeout:
                         raise
