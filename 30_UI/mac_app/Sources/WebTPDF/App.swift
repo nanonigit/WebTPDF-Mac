@@ -297,6 +297,7 @@ final class AppModel: ObservableObject {
         let url: String
         let direction: PageTurnDirection
         let timestamp: Date
+        var startedAt: Date? = nil
         let outputPath: String?
         let succeeded: Bool
         let errorMessage: String?
@@ -315,8 +316,30 @@ final class AppModel: ObservableObject {
             return formatter
         }()
 
+        private static let historyTimeOnlyFormatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "ja_JP")
+            formatter.dateFormat = "HH:mm"
+            return formatter
+        }()
+
+        private static let historyMonthDayTimeFormatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "ja_JP")
+            formatter.dateFormat = "MM/dd HH:mm"
+            return formatter
+        }()
+
         var formattedTimestamp: String {
-            Self.historyTimestampFormatter.string(from: timestamp)
+            let endStr = Self.historyTimestampFormatter.string(from: timestamp)
+            guard let startedAt else {
+                return endStr
+            }
+            let startStr = Self.historyTimestampFormatter.string(from: startedAt)
+            if Calendar.current.isDate(startedAt, inSameDayAs: timestamp) {
+                return "\(startStr)〜\(Self.historyTimeOnlyFormatter.string(from: timestamp))"
+            }
+            return "\(startStr)〜\(Self.historyMonthDayTimeFormatter.string(from: timestamp))"
         }
 
         var displayTitle: String {
@@ -1459,7 +1482,8 @@ final class AppModel: ObservableObject {
         unverifiedGaps: Int? = nil,
         verifiedPages: Int? = nil,
         loadingPages: Int? = nil,
-        bookTitle: String? = nil
+        bookTitle: String? = nil,
+        startedAt: Date? = nil
     ) {
         let key = normalizedDuplicateKey(url)
         let existingTitle = urlFetchHistory.first(where: { normalizedDuplicateKey($0.url) == key })?.bookTitle
@@ -1472,6 +1496,7 @@ final class AppModel: ObservableObject {
             url: url,
             direction: direction,
             timestamp: Date(),
+            startedAt: startedAt,
             outputPath: outputURL?.path,
             succeeded: succeeded,
             errorMessage: errorMessage,
@@ -1492,13 +1517,14 @@ final class AppModel: ObservableObject {
         saveURLFetchHistory()
     }
 
-    private func recordURLFetchFailure(url: String, direction: PageTurnDirection, error: Error) {
+    private func recordURLFetchFailure(url: String, direction: PageTurnDirection, error: Error, startedAt: Date? = nil) {
         let result = (error as? URLFetchInterrupted)?.result
         recordURLFetchHistory(
             url: url, direction: direction, outputURL: nil, succeeded: false,
             errorMessage: error.localizedDescription, pageCount: result?.pageCount, expectedPages: result?.expectedPages,
             lastPrintedPage: result?.lastPrintedPage, loadingPages: result?.loadingPages,
-            bookTitle: result?.bookTitle ?? activeFetchBookTitle
+            bookTitle: result?.bookTitle ?? activeFetchBookTitle,
+            startedAt: startedAt
         )
     }
 
@@ -1789,6 +1815,7 @@ final class AppModel: ObservableObject {
                 self.statusMessage = self.t("キュー実行中 (\(processedCount)): \(item.url)", "Queue (\(processedCount)): \(item.url)")
                 self.appendLog("\n[Queue #\(processedCount)] (\(item.direction.label)) \(item.url)\n")
 
+                let itemStartedAt = Date()
                 let outcome: Result<(URL, URLFetchResult), Error>
                 do {
                     outcome = .success(try await self.performURLFetch(urlString: item.url, direction: item.direction, aspectPreset: item.aspectPreset))
@@ -1808,7 +1835,7 @@ final class AppModel: ObservableObject {
                         if result.detectedDirection == "right" { return .right }
                         return item.direction
                     }()
-                    self.recordURLFetchHistory(url: item.url, direction: finalDirection, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages, bookTitle: result.bookTitle ?? item.bookTitle)
+                    self.recordURLFetchHistory(url: item.url, direction: finalDirection, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages, bookTitle: result.bookTitle ?? item.bookTitle, startedAt: itemStartedAt)
                     self.pdfQueue.remove(at: index)
                     let totalPages = max(1, (self.pdfQueue.count + 4) / 5)
                     if self.queuePageIndex >= totalPages {
@@ -1816,7 +1843,7 @@ final class AppModel: ObservableObject {
                     }
                     self.appendLog("[Queue #\(processedCount)] Saved -> \(mergedURL.path)\n")
                 case let .failure(error):
-                    self.recordURLFetchFailure(url: item.url, direction: item.direction, error: error)
+                    self.recordURLFetchFailure(url: item.url, direction: item.direction, error: error, startedAt: itemStartedAt)
                     if self.cancelRequested {
                         self.pdfQueue[index].status = .pending
                         self.pdfQueue[index].errorMessage = nil
@@ -1881,12 +1908,14 @@ final class AppModel: ObservableObject {
         progressText = "取得中"
         remainingText = "-"
         logText = "Fetching PDF from URL: \(urlString)\n"
+        let fetchStartedAt = Date()
         recordURLFetchHistory(
             url: urlString,
             direction: direction,
             outputURL: nil,
             succeeded: false,
-            errorMessage: t("取得中...", "Fetching...")
+            errorMessage: t("取得中...", "Fetching..."),
+            startedAt: fetchStartedAt
         )
         startProgressClock()
 
@@ -1909,7 +1938,7 @@ final class AppModel: ObservableObject {
                 self.progressText = "100%"
                 self.remainingText = "00:00"
                 self.refreshLibraryPDFs()
-                self.recordURLFetchHistory(url: urlString, direction: direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages)
+                self.recordURLFetchHistory(url: urlString, direction: direction, outputURL: mergedURL, succeeded: true, pageCount: result.pageCount, expectedPages: result.expectedPages, lastPrintedPage: result.lastPrintedPage, unverifiedGaps: result.unverifiedGaps, verifiedPages: result.verifiedPages, loadingPages: result.loadingPages, startedAt: fetchStartedAt)
                 self.appendLog("\nMerged PDF saved to: \(mergedURL.path)\n")
                 self.sendCompletionNotification(
                     title: self.t("PDF作成完了", "PDF Created"),
@@ -1919,7 +1948,7 @@ final class AppModel: ObservableObject {
             } catch {
                 self.preflightTask = nil
                 self.isFetchingURL = false
-                self.recordURLFetchFailure(url: urlString, direction: direction, error: error)
+                self.recordURLFetchFailure(url: urlString, direction: direction, error: error, startedAt: fetchStartedAt)
                 if self.cancelRequested {
                     self.finishCanceledPreflight()
                 } else {
