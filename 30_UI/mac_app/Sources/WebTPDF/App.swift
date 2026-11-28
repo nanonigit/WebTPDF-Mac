@@ -3792,10 +3792,13 @@ struct ContentView: View {
                         Image(systemName: collapsed ? "chevron.right" : "chevron.down")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                            .frame(width: 12)
+                            .frame(width: 16, height: 16)
                         Text(urlToPDFSectionTitle(sectionID))
                             .font(.subheadline.weight(.semibold))
                     }
+                    .padding(.vertical, 3)
+                    .padding(.trailing, 8)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(model.t("クリックして折りたたみ / 展開", "Click to collapse / expand"))
@@ -4861,12 +4864,15 @@ struct ContentView: View {
                         Image(systemName: collapsed ? "chevron.right" : "chevron.down")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                            .frame(width: 12)
+                            .frame(width: 16, height: 16)
                         Text(sectionID == .history
                              ? model.t("取得履歴 (\(model.sortedFilteredHistory().count)件)", "Fetch History (\(model.sortedFilteredHistory().count))")
                              : sectionID.title(model.uiLanguage))
                             .font(.subheadline.weight(.semibold))
                     }
+                    .padding(.vertical, 3)
+                    .padding(.trailing, 8)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(model.t("クリックして折りたたみ / 展開", "Click to collapse / expand"))
