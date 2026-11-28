@@ -4058,6 +4058,8 @@ def fetch_via_browser(
                         log(f"[Browser] Page {page_idx} remained on loading/error screen after retries; discarding and stopping.")
                         break
                 if reader_mode and is_pdf_loading_spinner(page_pdf_bytes):
+                    prev_spin_sig = pdf_content_signature(page_pdf_bytes)
+                    static_spin_hits = 0
                     for spin_retry in range(8):
                         log(f"[Reader] Page {page_idx} showing loading spinner; waiting for manga/page render ({spin_retry + 1}/8)...")
                         page.wait_for_timeout(1200)
@@ -4068,10 +4070,21 @@ def fetch_via_browser(
                             page_pdf_bytes, reader_png = spin_cap
                         if not is_pdf_loading_spinner(page_pdf_bytes):
                             break
+                        cur_spin_sig = pdf_content_signature(page_pdf_bytes)
+                        if cur_spin_sig == prev_spin_sig:
+                            static_spin_hits += 1
+                            if static_spin_hits >= 2:
+                                # A real loading spinner animates/rotates; a 100% static page with centered content
+                                # is a genuine chapter-divider page (e.g. "第2章" or solid-black divider).
+                                log(f"[Reader] Page {page_idx} is static (not an animated spinner); keeping as real chapter/divider page.")
+                                break
+                        else:
+                            static_spin_hits = 0
+                            prev_spin_sig = cur_spin_sig
                     if is_reader_oops(page):
                         continue
-                    if is_pdf_loading_spinner(page_pdf_bytes):
-                        log(f"[Reader] Page {page_idx} remained on loading spinner after 10s; triggering recovery instead of saving spinner.")
+                    if is_pdf_loading_spinner(page_pdf_bytes) and static_spin_hits < 2 and recovery_attempts == 0:
+                        log(f"[Reader] Page {page_idx} remained on animated loading spinner after 10s; triggering recovery instead of saving spinner.")
                         needs_recovery = True
                         continue
                 if is_pdf_visually_blank(page_pdf_bytes):
@@ -4490,6 +4503,44 @@ def fetch_and_merge(
     raise RuntimeError(f"No PDF content found at URL: {url}")
 
 
+def _restart_dedicated_chrome_cdp() -> bool:
+    """Restart ONLY the dedicated --remote-debugging-port=9223 Chrome instance in the background
+    when its CDP WebSocket becomes unresponsive."""
+    try:
+        import subprocess
+
+        subprocess.run(
+            ["pkill", "-f", "remote-debugging-port=9223"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        time.sleep(2.0)
+        profile_dir = Path.home() / ".cache" / "ebookconverter-chrome"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(
+            [
+                "/usr/bin/open", "-g", "-n", "-a", "Google Chrome",
+                "--args",
+                "--remote-debugging-port=9223",
+                f"--user-data-dir={profile_dir}",
+                "--no-first-run",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(30):
+            time.sleep(0.4)
+            if resolve_cdp_url() is not None:
+                log("[Browser] Dedicated Chrome restarted cleanly in background.")
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch PDF(s) from a URL with pagination and merge into one PDF.")
     parser.add_argument("--url", required=True, help="Source URL")
@@ -4561,6 +4612,9 @@ def main() -> int:
                     consecutive_stalls += 1
                     if consecutive_stalls > 3:
                         raise
+                    if "connect_over_cdp" in exc_text or "connection closed" in exc_text:
+                        log("[Browser] Dedicated Chrome CDP became unresponsive; restarting Chrome in background...")
+                        _restart_dedicated_chrome_cdp()
                     log(f"[Reader] Transient timeout/error ({type(exc).__name__}) at {after_count} saved page(s); auto-resuming in a fresh tab ({consecutive_stalls}/3)...")
                     time.sleep(3)
         elif args.auto_name and not args.no_browser:
