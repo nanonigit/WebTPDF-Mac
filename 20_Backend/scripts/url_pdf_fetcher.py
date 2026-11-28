@@ -256,7 +256,7 @@ def normalize_reader_pages_to_cover_size(
                         v1 = list(g1.getdata())
                         non_white_0 = sum(1 for v in v0 if v < 240) / len(v0)
                         mean_diff = sum(abs(a - b) for a, b in zip(v0, v1)) / len(v0)
-                        if non_white_0 >= 0.20 and mean_diff < 1.5:
+                        if non_white_0 >= 0.20 and mean_diff < 4.5:
                             log(f"[Reader] Removed duplicate cover page 2 (visual diff={mean_diff:.2f}).")
                             pdf_blobs = [pdf_blobs[0]] + pdf_blobs[2:]
             except Exception:
