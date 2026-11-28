@@ -242,6 +242,26 @@ def normalize_reader_pages_to_cover_size(
     try:
         import pymupdf
 
+        # Drop accidental duplicate Cover page (e.g. Page 0 and Page 1 both capturing the exact same Cover
+        # when Kindle's first arrow-key press only faded out a UI icon instead of turning the page).
+        if len(pdf_blobs) >= 3:
+            try:
+                with pymupdf.open(stream=pdf_blobs[0], filetype="pdf") as d0, pymupdf.open(stream=pdf_blobs[1], filetype="pdf") as d1:
+                    if len(d0) == 1 and len(d1) == 1:
+                        p0 = d0[0].get_pixmap(dpi=36, alpha=False)
+                        p1 = d1[0].get_pixmap(dpi=36, alpha=False)
+                        g0 = Image.frombytes("RGB", (p0.width, p0.height), p0.samples).convert("L").resize((48, 64))
+                        g1 = Image.frombytes("RGB", (p1.width, p1.height), p1.samples).convert("L").resize((48, 64))
+                        v0 = list(g0.getdata())
+                        v1 = list(g1.getdata())
+                        non_white_0 = sum(1 for v in v0 if v < 240) / len(v0)
+                        mean_diff = sum(abs(a - b) for a, b in zip(v0, v1)) / len(v0)
+                        if non_white_0 >= 0.20 and mean_diff < 1.5:
+                            log(f"[Reader] Removed duplicate cover page 2 (visual diff={mean_diff:.2f}).")
+                            pdf_blobs = [pdf_blobs[0]] + pdf_blobs[2:]
+            except Exception:
+                pass
+
         rects: list[tuple[float, float] | None] = []
         max_w = 0.0
         max_h = 0.0
@@ -970,6 +990,9 @@ READER_UPSELL_MARKERS: tuple[str, ...] = (
     "サンプル版は以上です",
     "続きは本編をご覧ください",
     "シリーズの次の",
+    "シリーズ購読に登録する",
+    "続きを読むにはこちら",
+    "kindle ストアでシリーズを見る",
     "1-click で今すぐ購入",
     "1-clickで今すぐ購入",
     "注文を確定する",
@@ -996,16 +1019,31 @@ def is_reader_upsell_or_next_book(
             return f"Book ASIN changed ({start_asin} -> {cur_asin}; next volume/sample detected)"
     except Exception:
         pass
+    # Inspect main document AND all child iframes (Kindle Manga Reader renders store upsell sidebars in iframes).
+    texts_to_check: list[str] = []
     try:
-        body_text = (page.inner_text("body", timeout=1500) or "")
+        texts_to_check.append(page.inner_text("body", timeout=1500) or "")
+    except Exception:
+        pass
+    try:
+        for fr in getattr(page, "frames", []) or []:
+            if fr == getattr(page, "main_frame", None):
+                continue
+            try:
+                ft = fr.inner_text("body", timeout=800) or ""
+                if ft:
+                    texts_to_check.append(ft)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for body_text in texts_to_check:
         low = body_text.lower()
         for marker in READER_UPSELL_MARKERS:
             if marker in low:
                 return f"End-of-book / store upsell screen detected ('{marker}')"
         if "続けて読む" in body_text and ("kindle 価格" in body_text or "kindle価格" in body_text or "購入" in body_text):
             return "Next-volume purchase upsell detected ('続けて読む')"
-    except Exception:
-        pass
     if start_title:
         try:
             cur_title, _ = extract_book_title_and_date(page)
