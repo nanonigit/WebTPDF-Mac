@@ -3649,6 +3649,7 @@ def fetch_via_browser(
             prev_hash: str | None = None
             prev_pdf_hash: str | None = None
             recent_pdf_hashes: list[str] = []
+            consecutive_cycle_hits = 0
             last_reader_page: int | None = None
             expected_total_pages: int | None = None
             last_reader_percent: int | None = None
@@ -4227,13 +4228,17 @@ def fetch_via_browser(
                 if reader_mode and is_reader_oops(page):
                     continue
                 if reader_mode and current_pdf_hash in recent_pdf_hashes:
-                    log(f"[Reader] Detected repeated page cycle at page {page_idx} (already captured in recent pages); stopping pagination cleanly.")
-                    break
+                    consecutive_cycle_hits += 1
+                    if consecutive_cycle_hits >= 3:
+                        log(f"[Reader] Detected repeated page cycle at page {page_idx} ({consecutive_cycle_hits} consecutive repeated pages); stopping pagination cleanly.")
+                        break
+                else:
+                    consecutive_cycle_hits = 0
                 prev_hash = current_hash
                 prev_pdf_hash = current_pdf_hash
                 recent_pdf_hashes.append(current_pdf_hash)
-                if len(recent_pdf_hashes) > 10:
-                    recent_pdf_hashes = recent_pdf_hashes[-10:]
+                if len(recent_pdf_hashes) > 12:
+                    recent_pdf_hashes = recent_pdf_hashes[-12:]
                 if reader_mode:
                     last_reader_image_hash = hashlib.sha256(reader_png).hexdigest() if reader_png is not None else None
                     marker = get_reader_position(page)
