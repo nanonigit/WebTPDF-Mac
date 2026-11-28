@@ -3108,16 +3108,22 @@ def extract_book_title_and_date(page) -> tuple[str | None, str | None]:
     return None, None
 
 
-def resolve_auto_output_path(base_output: Path, title: str | None, pub_date: str | None) -> Path:
-    """Build <dir>/<title>_<YYYYMMDD>.pdf (or <title>.pdf), avoiding collisions."""
+def resolve_auto_output_path(
+    base_output: Path,
+    title: str | None,
+    pub_date: str | None,
+    *,
+    overwrite_existing: bool = False,
+) -> Path:
+    """Build <dir>/<title>_<YYYYMMDD>.pdf (or <title>.pdf).
+    When overwrite_existing=True (e.g. re-downloading a Kindle book), replace <title>.pdf directly
+    instead of creating <title>_2.pdf and leaving an older broken copy behind."""
     safe_title = sanitize_filename(title or "")
     if not safe_title:
         return base_output
     stem = f"{safe_title}_{pub_date}" if pub_date else safe_title
     candidate = base_output.with_name(f"{stem}.pdf")
-    if candidate == base_output:
-        return candidate
-    if not candidate.exists():
+    if overwrite_existing or candidate == base_output or not candidate.exists():
         return candidate
     for idx in range(2, 100):
         alt = base_output.with_name(f"{stem}_{idx}.pdf")
@@ -3583,7 +3589,7 @@ def fetch_via_browser(
                 if detected_title and result_details is not None:
                     result_details["bookTitle"] = detected_title
             if auto_name:
-                resolved_output = resolve_auto_output_path(output_path, detected_title, detected_pub)
+                resolved_output = resolve_auto_output_path(output_path, detected_title, detected_pub, overwrite_existing=reader_mode)
                 if resolved_output != output_path:
                     log(f"[AutoName] Output filename -> {resolved_output.name}")
             book_title = detected_title if reader_mode else None
@@ -3787,7 +3793,7 @@ def fetch_via_browser(
                         if recovered and book_title is None:
                             book_title, published = extract_book_title_and_date(page)
                             if auto_name and resolved_output == output_path and book_title:
-                                resolved_output = resolve_auto_output_path(output_path, book_title, published)
+                                resolved_output = resolve_auto_output_path(output_path, book_title, published, overwrite_existing=True)
                         if needs_recovery and not page.is_closed():
                             page.wait_for_timeout(1000)
                         continue
