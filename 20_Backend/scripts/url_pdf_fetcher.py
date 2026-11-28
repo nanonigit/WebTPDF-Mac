@@ -1010,6 +1010,8 @@ def is_reader_upsell_or_next_book(
     page,
     start_asin: str | None,
     start_title: str | None,
+    *,
+    allow_title_change: bool = True,
 ) -> str | None:
     """Return a stop reason if Kindle Reader has transitioned past the end of the book into
     a store upsell screen, rating overlay, or the free sample of the next volume in a series."""
@@ -1044,7 +1046,7 @@ def is_reader_upsell_or_next_book(
                 return f"End-of-book / store upsell screen detected ('{marker}')"
         if "続けて読む" in body_text and ("kindle 価格" in body_text or "kindle価格" in body_text or "購入" in body_text):
             return "Next-volume purchase upsell detected ('続けて読む')"
-    if start_title:
+    if allow_title_change and start_title:
         try:
             cur_title, _ = extract_book_title_and_date(page)
             if cur_title:
@@ -1530,6 +1532,8 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
     log(f"[Reader] Stepping back to true cover (page 1) via {reverse_key}...")
     unchanged = 0
     for step in range(max_steps):
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(60)
         dismiss_reader_dialogs(page)
         prev_pos = get_reader_position(page)
         prev_src = page.evaluate(READER_PAGE_SOURCE)
@@ -1587,13 +1591,22 @@ def rewind_reader_to_start(page, turn_key: str, max_steps: int = 600) -> None:
 
 
 def is_reader_oops(page) -> bool:
-    """Return True if paginated ebook reader is showing 'Oops... Something Went Wrong'."""
+    """Return True if paginated ebook reader is showing 'Oops... Something Went Wrong' (EN or JA)."""
     try:
-        back_btn = page.locator("button:has-text('Back to Library'), a:has-text('Back to Library')").first
+        back_btn = page.locator(
+            "button:has-text('Back to Library'), a:has-text('Back to Library'), "
+            "button:has-text('ライブラリに戻る'), a:has-text('ライブラリに戻る')"
+        ).first
         if back_btn.count() > 0 and back_btn.is_visible():
             return True
         body_text = (page.inner_text("body", timeout=1500) or "").lower()
-        return "something went wrong" in body_text and "back to library" in body_text
+        if "something went wrong" in body_text and "back to library" in body_text:
+            return True
+        if ("エラーが発生しました" in body_text or "問題が発生しました" in body_text) and (
+            "ライブラリ" in body_text or "もう一度" in body_text or "再読み込み" in body_text
+        ):
+            return True
+        return False
     except Exception:
         return False
 
@@ -1821,6 +1834,12 @@ def check_reader_completeness(
         else:
             incomplete = (page_count + max(1, skipped_blank_steps)) < expected_pages
     else:
+        if page_count < 4 and last_percent != 100:
+            raise IncompleteReaderCapture(
+                f"取得ページ数が極端に少ないため中断しました（{page_count} ページ）。再ダウンロードしてください。",
+                page_count,
+                expected_pages,
+            )
         incomplete = last_percent is not None and last_percent < 95
     if incomplete:
         message = "最大ページ数に達しました。上限を増やしてください。" if page_count >= max_pages else "本の最後まで取得できませんでした。"
@@ -3072,7 +3091,13 @@ def extract_book_title_and_date(page) -> tuple[str | None, str | None]:
         )
         if isinstance(info, dict):
             title = str(info.get("title") or "").strip()
-            if title.lower() in {"kindle", "loading", ""}:
+            low_title = title.lower()
+            if (
+                low_title in {"kindle", "loading", "error", "kindle library", "ライブラリ", "読み込み中", ""}
+                or "エラーが発生しました" in title
+                or "問題が発生しました" in title
+                or "something went wrong" in low_title
+            ):
                 title = ""
             pub_raw = str(info.get("pubMeta") or "")
             m_date = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", pub_raw)
@@ -3679,7 +3704,10 @@ def fetch_via_browser(
                 if reader_mode:
                     dismiss_reader_dialogs(page)
                     if page_idx > 1 and not needs_recovery and not is_reader_oops(page):
-                        upsell_reason = is_reader_upsell_or_next_book(page, start_asin, book_title)
+                        upsell_reason = is_reader_upsell_or_next_book(
+                            page, start_asin, book_title,
+                            allow_title_change=(page_idx >= 15 or prev_was_near_end),
+                        )
                         if upsell_reason:
                             log(f"[Reader] {upsell_reason}; stopping pagination cleanly.")
                             break
