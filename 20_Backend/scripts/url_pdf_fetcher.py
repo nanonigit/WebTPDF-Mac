@@ -901,6 +901,131 @@ def is_pdf_visually_blank(pdf_bytes: bytes) -> bool:
         return False
 
 
+def is_pdf_loading_spinner(pdf_bytes: bytes) -> bool:
+    """Return True if a captured reader PDF page is a dark-mode or light-mode loading spinner screen
+    (e.g. Kindle Manga Web Reader's all-black screen with a tiny centered rotating arc)."""
+    try:
+        import pymupdf
+
+        with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+            if len(doc) != 1:
+                return False
+            pg = doc[0]
+            if pg.get_text().strip():
+                return False
+            pix = pg.get_pixmap(dpi=36, alpha=False)
+            if pix.width < 10 or pix.height < 10:
+                return False
+            im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples).convert("L")
+            w, h = im.size
+            px = im.load()
+            total = w * h
+            dark_count = 0
+            white_count = 0
+            non_bg_outside_center = 0
+            cx0, cx1 = int(w * 0.30), int(w * 0.70)
+            cy0, cy1 = int(h * 0.30), int(h * 0.70)
+            for y in range(h):
+                for x in range(w):
+                    v = px[x, y]
+                    if v <= 20:
+                        dark_count += 1
+                    elif v >= 240:
+                        white_count += 1
+            dark_ratio = dark_count / total
+            white_ratio = white_count / total
+            # Dark-mode loading spinner: >= 97.5% pure black with at most a tiny spinner in the center.
+            if dark_ratio >= 0.975:
+                for y in range(h):
+                    for x in range(w):
+                        if px[x, y] > 20 and not (cx0 <= x <= cx1 and cy0 <= y <= cy1):
+                            non_bg_outside_center += 1
+                if (non_bg_outside_center / total) < 0.005:
+                    return True
+            # Light-mode loading spinner: >= 97.5% pure white with non-white pixels strictly inside center box.
+            if white_ratio >= 0.975 and dark_count < total * 0.025:
+                non_white_in_center = 0
+                for y in range(h):
+                    for x in range(w):
+                        if px[x, y] < 240:
+                            if cx0 <= x <= cx1 and cy0 <= y <= cy1:
+                                non_white_in_center += 1
+                            else:
+                                non_bg_outside_center += 1
+                if non_white_in_center > 0 and (non_bg_outside_center / total) < 0.003:
+                    return True
+            return False
+    except Exception:
+        return False
+
+
+def _extract_reader_asin(url: str | None) -> str | None:
+    if not url:
+        return None
+    m = re.search(r"(?:[?&]asin=|/manga/)([A-Z0-9]{10})", url, re.I)
+    return m.group(1).upper() if m else None
+
+
+READER_UPSELL_MARKERS: tuple[str, ...] = (
+    "サンプル版は以上です",
+    "続きは本編をご覧ください",
+    "シリーズの次の",
+    "1-click で今すぐ購入",
+    "1-clickで今すぐ購入",
+    "注文を確定する",
+    "before you go",
+    "rate this book",
+    "この本を評価",
+    "end of sample",
+    "next in series",
+    "次巻のサンプル",
+    "サンプル版の終わり",
+)
+
+
+def is_reader_upsell_or_next_book(
+    page,
+    start_asin: str | None,
+    start_title: str | None,
+) -> str | None:
+    """Return a stop reason if Kindle Reader has transitioned past the end of the book into
+    a store upsell screen, rating overlay, or the free sample of the next volume in a series."""
+    try:
+        cur_asin = _extract_reader_asin(page.url)
+        if start_asin and cur_asin and cur_asin != start_asin:
+            return f"Book ASIN changed ({start_asin} -> {cur_asin}; next volume/sample detected)"
+    except Exception:
+        pass
+    try:
+        body_text = (page.inner_text("body", timeout=1500) or "")
+        low = body_text.lower()
+        for marker in READER_UPSELL_MARKERS:
+            if marker in low:
+                return f"End-of-book / store upsell screen detected ('{marker}')"
+        if "続けて読む" in body_text and ("kindle 価格" in body_text or "kindle価格" in body_text or "購入" in body_text):
+            return "Next-volume purchase upsell detected ('続けて読む')"
+    except Exception:
+        pass
+    if start_title:
+        try:
+            cur_title, _ = extract_book_title_and_date(page)
+            if cur_title:
+                s_norm = re.sub(r"\s+", "", start_title).lower()
+                c_norm = re.sub(r"\s+", "", cur_title).lower()
+                # Ignore generic library/Kindle chrome titles; trigger only when a genuinely different book title appears.
+                if (
+                    len(s_norm) >= 3
+                    and len(c_norm) >= 3
+                    and c_norm not in ("kindle", "ライブラリ", "kindlelibrary")
+                    and s_norm not in c_norm
+                    and c_norm not in s_norm
+                ):
+                    return f"Book title changed ('{start_title}' -> '{cur_title}'; next volume detected)"
+        except Exception:
+            pass
+    return None
+
+
 LOADING_OR_ERROR_PHRASES: tuple[str, ...] = (
     "hang tight",
     "this'll take just a sec",
@@ -3481,6 +3606,8 @@ def fetch_via_browser(
             collected_page_pdfs = [capture.pdf for capture in saved_pages]
             skipped_blank_steps = restored_skipped_steps
             consecutive_blank_skips = 0
+            start_asin = _extract_reader_asin(start_url)
+            prev_was_near_end = False
             prev_hash: str | None = None
             prev_pdf_hash: str | None = None
             recent_pdf_hashes: list[str] = []
@@ -3512,6 +3639,22 @@ def fetch_via_browser(
                     signal.alarm(60)
                 if reader_mode:
                     dismiss_reader_dialogs(page)
+                    if page_idx > 1 and not needs_recovery and not is_reader_oops(page):
+                        upsell_reason = is_reader_upsell_or_next_book(page, start_asin, book_title)
+                        if upsell_reason:
+                            log(f"[Reader] {upsell_reason}; stopping pagination cleanly.")
+                            break
+                        if prev_was_near_end:
+                            cur_m = get_reader_position(page)
+                            cur_t = get_reader_total_pages(page)
+                            cur_p = get_reader_progress_percent(page)
+                            if (
+                                (cur_m is not None and cur_m[1] <= 5)
+                                or (cur_p is not None and cur_p <= 10)
+                                or (expected_total_pages is not None and cur_t is not None and cur_t != expected_total_pages and cur_t < expected_total_pages)
+                            ):
+                                log(f"[Reader] Reader position reset after end of book (pos={cur_m}, total={cur_t}, pct={cur_p}); next-volume sample detected — stopping cleanly.")
+                                break
                     if needs_recovery or is_reader_oops(page):
                         if _is_reader_at_end(last_reader_page, expected_total_pages, last_reader_percent):
                             break
@@ -3847,6 +3990,23 @@ def fetch_via_browser(
                             continue
                         log(f"[Browser] Page {page_idx} remained on loading/error screen after retries; discarding and stopping.")
                         break
+                if reader_mode and is_pdf_loading_spinner(page_pdf_bytes):
+                    for spin_retry in range(8):
+                        log(f"[Reader] Page {page_idx} showing loading spinner; waiting for manga/page render ({spin_retry + 1}/8)...")
+                        page.wait_for_timeout(1200)
+                        if is_reader_oops(page):
+                            break
+                        spin_cap = capture_reader_page_as_pdf_bytes(page, cdp_session=cdp_session, scale_factor=scale_factor)
+                        if spin_cap is not None:
+                            page_pdf_bytes, reader_png = spin_cap
+                        if not is_pdf_loading_spinner(page_pdf_bytes):
+                            break
+                    if is_reader_oops(page):
+                        continue
+                    if is_pdf_loading_spinner(page_pdf_bytes):
+                        log(f"[Reader] Page {page_idx} remained on loading spinner after 10s; triggering recovery instead of saving spinner.")
+                        needs_recovery = True
+                        continue
                 if is_pdf_visually_blank(page_pdf_bytes):
                     for retry in range(2):
                         log(f"[Browser] Page {page_idx} rendered blank; waiting and retrying ({retry + 1}/2)...")
@@ -4068,6 +4228,29 @@ def fetch_via_browser(
                 collected_page_pdfs.append(page_pdf_bytes)
                 consecutive_blank_skips = 0
                 log(f"[Browser] Captured page {page_idx} via PDF command ({len(page_pdf_bytes)} bytes)")
+
+                if reader_mode:
+                    if (
+                        (last_reader_percent is not None and last_reader_percent >= 95)
+                        or (
+                            expected_total_pages is not None
+                            and expected_total_pages > 0
+                            and last_reader_page is not None
+                            and (last_reader_page / expected_total_pages) >= 0.95
+                        )
+                    ):
+                        prev_was_near_end = True
+                    # Stop immediately once the very last page is captured so we never press turn_key
+                    # into Kindle's next-volume free sample or store upsell screen.
+                    if (
+                        page_idx > 3
+                        and expected_total_pages is not None
+                        and last_reader_page is not None
+                        and last_reader_page >= expected_total_pages
+                        and (last_reader_percent is None or last_reader_percent >= 99)
+                    ):
+                        log(f"[Reader] Reached final page ({last_reader_page}/{expected_total_pages}); stopping cleanly before next-volume sample.")
+                        break
 
                 if len(collected_page_pdfs) == max_pages:
                     break
